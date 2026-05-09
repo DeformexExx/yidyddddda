@@ -110,7 +110,7 @@ class SystemMonitor:
         con = await self.get_connections()
         if con <= self.tcp_zombie_threshold:
             code, out, err = await run_bash(
-                "am force-stop com.roblox.client && am start -n com.roblox.client/com.roblox.client.MainActivity",
+                "am force-stop com.roblox.client && am start -n com.roblox.client/com.roblox.client.startup.ActivitySplash",
                 root=True,
             )
             if code != 0:

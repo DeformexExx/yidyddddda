@@ -193,7 +193,7 @@ def hard_reset_clone(device_name: str) -> tuple[int, str, str]:
     code, out, err = run_shell(f"am force-stop {target_process_name()}", root=True, timeout=20)
     time.sleep(2)
     code2, out2, err2 = run_shell(
-        f"am start -n {shlex.quote(pkg)}/com.roblox.client.MainActivity",
+        f"am start -n {shlex.quote(pkg)}/com.roblox.client.startup.ActivitySplash",
         root=True,
         timeout=20,
     )
@@ -278,7 +278,7 @@ def inject_cookie_for_device(device_name: str, cookie_value: str) -> tuple[bool,
 
     time.sleep(2)
     launch_code, launch_out, launch_err = run_shell(
-        "am start -n com.roblox.client/com.roblox.client.MainActivity",
+        "am start -n com.roblox.client/com.roblox.client.startup.ActivitySplash",
         root=True,
         timeout=20,
     )
