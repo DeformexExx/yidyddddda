@@ -17,6 +17,18 @@ pip install --upgrade pip
 pip install -r requirements.txt
 nano config.json
 python bot.py
+
+
+
+
+pkill -f python
+pip uninstall aiogram aiohttp pydantic -y
+
+pkg install python-psutil -y
+pip install pyTelegramBotAPI loguru requests
+
+
+
 ```
 
 ## Notes
