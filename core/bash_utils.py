@@ -9,18 +9,24 @@ TERMUX_BASH = f"{TERMUX_BIN}/bash"
 
 async def run_bash(command: str, root: bool = False, timeout: int = 20) -> tuple[int, str, str]:
     env = os.environ.copy()
-    env["PATH"] = "/data/data/com.termux/files/usr/bin:/data/data/com.termux/files/usr/bin/applets:/system/bin:/system/xbin"
-    env["LD_LIBRARY_PATH"] = "/data/data/com.termux/files/usr/lib"
+    env.update(
+        {
+            "PATH": f"{TERMUX_BIN}:{TERMUX_BIN}/applets:/system/bin:/system/xbin",
+            "LD_LIBRARY_PATH": "/data/data/com.termux/files/usr/lib",
+            "HOME": "/data/data/com.termux/files/home",
+            "TERM": "xterm-256color",
+        }
+    )
 
-    bash_wrapped = f"{shlex.quote(TERMUX_BASH)} -c {shlex.quote(command)}"
     already_root = hasattr(os, "geteuid") and os.geteuid() == 0
-    final_command = bash_wrapped if (not root or already_root) else f"su -c {shlex.quote(bash_wrapped)}"
+    final_command = command if (not root or already_root) else f"su -c {shlex.quote(command)}"
 
     proc = await asyncio.create_subprocess_shell(
         final_command,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
+        executable=TERMUX_BASH,
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
