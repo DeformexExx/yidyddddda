@@ -107,7 +107,7 @@ def get_session(user_id: int) -> SessionState:
 
 def render_main(user_id: int):
     s = get_session(user_id)
-    return build_main_text(config.device_name, s.selected_device, persistence.silent_mode), build_dashboard(list(devices.keys()))
+    return build_main_text(config.device_name, s.selected_device, persistence.silent_mode), build_dashboard(None, list(devices.keys()), None, None, None)
 
 
 def render_device(device_id: str):

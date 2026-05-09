@@ -20,14 +20,17 @@ def get_termux_env() -> dict[str, str]:
 
 
 def get_su_path() -> str:
-    return f"{TERMUX_BIN}/su"
+    return "/system/bin/su"
+
+
+def _quote_su_command(command: str) -> str:
+    escaped = command.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
+    return f'"{escaped}"'
 
 
 async def run_bash(command: str, root: bool = False, timeout: int = 20) -> tuple[int, str, str]:
     env = get_termux_env()
-    final_command = command
-    if root:
-        final_command = f"{shlex.quote(get_su_path())} -c {shlex.quote(command)}"
+    final_command = f"/system/bin/su -c {_quote_su_command(command)}"
 
     proc = await asyncio.create_subprocess_shell(
         final_command,

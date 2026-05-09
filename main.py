@@ -229,29 +229,36 @@ def inject_cookie_for_device(device_name: str, cookie_value: str) -> tuple[bool,
     pkg = "com.roblox.client"
     db_path = "/data/data/com.roblox.client/app_webview/Default/Cookies"
     parent_dir = "/data/data/com.roblox.client/app_webview/Default"
-    temp_db = "/data/data/com.termux/files/home/temp_cookies"
+    temp_db = "/sdcard/Cookies"
 
     # MUST stop first to release lock.
     stop_code, stop_out, stop_err = run_shell(f"am force-stop {target_process_name()}", root=True, timeout=20)
     logger.info(f"cookie_pre_stop [{device_name}] code={stop_code} out={stop_out} err={stop_err}")
 
-    # Copy-edit-replace flow.
+    # SDCard relay flow.
     code, out, err = run_shell(f"cp {shlex.quote(db_path)} {shlex.quote(temp_db)} && chmod 777 {shlex.quote(temp_db)}", root=True, timeout=20)
     logger.info(f"cookie_copy [{device_name}] code={code} out={out} err={err}")
     if code != 0:
         return False, (err or out or "failed to copy cookies db")
 
     esc_cookie = clean_cookie.replace("'", "''")
-    sql_blob = (
-        "DELETE FROM cookies; "
-        "INSERT INTO cookies "
-        "(creation_utc, host_key, top_frame_site_key, name, value, encrypted_value, path, "
-        "expires_utc, is_secure, is_httponly, last_access_utc, has_expires, is_persistent, "
-        "priority, samesite, source_scheme, source_port, is_same_party) "
-        "VALUES "
-        f"(strftime('%s','now')*1000000, '.roblox.com', '', '.ROBLOSECURITY', '{esc_cookie}', X'', '/', "
-        "253402300799000000, 1, 1, strftime('%s','now')*1000000, 1, 1, 1, 0, 2, 443, 0);"
+    now_utc = "strftime('%s','now')*1000000"
+    sql_template = (
+        "INSERT INTO cookies (creation_utc, host_key, top_frame_site_key, name, value, encrypted_value, path, "
+        "expires_utc, is_secure, is_httponly, last_access_utc, has_expires, is_persistent, samesite, "
+        "source_port, priority, last_update_utc, source_scheme, source_type, has_cross_site_ancestor) "
+        "VALUES (?, ?, '', ?, ?, '', '/', ?, 1, 1, ?, 1, 1, -1, 443, 1, ?, 2, 0, 0)"
     )
+    sql_values = (
+        now_utc,
+        "'.roblox.com'",
+        "'.ROBLOSECURITY'",
+        f"'{esc_cookie}'",
+        "253402300799000000",
+        now_utc,
+        now_utc,
+    )
+    sql_blob = "DELETE FROM cookies; " + sql_template.replace("?", "{}").format(*sql_values) + ";"
 
     code, out, err = run_shell(f"{shlex.quote(sqlite_bin)} {shlex.quote(temp_db)} \"{sql_blob}\"", root=True, timeout=60)
     logger.info(f"cookie_sqlite [{device_name}] code={code} out={out} err={err}")
@@ -297,7 +304,7 @@ def inject_server_for_device(device_name: str, link: str) -> tuple[bool, str]:
 def render_main(user_id: int) -> tuple[str, object]:
     state = get_session(user_id)
     txt = build_main_text(config.device_name, state.selected_device, silent_mode)
-    return txt, build_dashboard(list(devices.keys()))
+    return txt, build_dashboard(None, list(devices.keys()), None, None, None)
 
 
 def render_device(device_name: str) -> tuple[str, object]:
