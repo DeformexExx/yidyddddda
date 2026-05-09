@@ -133,8 +133,20 @@ def get_session(user_id: int) -> SessionState:
 
 
 def startup_conflict_prevention() -> None:
-    # Required bootstrap guard against 409 Conflict
-    run_async(run_bash("pkill -f python", root=True, timeout=5))
+    # Guard against duplicate polling instances without killing unrelated Python processes
+    pid_file = Path(".bot.pid")
+    current_pid = os.getpid()
+
+    if pid_file.exists():
+        try:
+            old_pid = int(pid_file.read_text(encoding="utf-8").strip())
+        except (TypeError, ValueError):
+            old_pid = 0
+
+        if old_pid and old_pid != current_pid:
+            run_async(run_bash(f"kill -9 {old_pid}", root=True, timeout=5))
+
+    pid_file.write_text(str(current_pid), encoding="utf-8")
 
 
 def run_shell(command: str, root: bool = False, timeout: int = 120) -> tuple[int, str, str]:
