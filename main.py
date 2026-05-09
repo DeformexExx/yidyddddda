@@ -246,7 +246,8 @@ def inject_cookie_for_device(device_name: str, cookie_value: str) -> tuple[bool,
         return False, (err or out or "failed to copy cookies db")
 
     esc_cookie = clean_cookie.replace("'", "''")
-    now_utc = "strftime('%s','now')*1000000"
+    creation_utc = "((strftime('%s','now') + 11644473600) * 1000000)"
+    expires_utc = "((strftime('%s','now') + 11644473600 + 31536000) * 1000000)"
     sql_template = (
         "INSERT INTO cookies (creation_utc, host_key, top_frame_site_key, name, value, encrypted_value, path, "
         "expires_utc, is_secure, is_httponly, last_access_utc, has_expires, is_persistent, samesite, "
@@ -254,13 +255,13 @@ def inject_cookie_for_device(device_name: str, cookie_value: str) -> tuple[bool,
         "VALUES (?, ?, '', ?, ?, '', '/', ?, 1, 1, ?, 1, 1, -1, 443, 1, ?, 2, 0, 0)"
     )
     sql_values = (
-        now_utc,
+        creation_utc,
         "'.roblox.com'",
         "'.ROBLOSECURITY'",
         f"'{esc_cookie}'",
-        "253402300799000000",
-        now_utc,
-        now_utc,
+        expires_utc,
+        creation_utc,
+        creation_utc,
     )
     sql_blob = "DELETE FROM cookies; " + sql_template.replace("?", "{}").format(*sql_values) + ";"
 
