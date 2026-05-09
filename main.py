@@ -163,11 +163,16 @@ def run_shell(command: str, root: bool = False, timeout: int = 120) -> tuple[int
 
 
 def device_package(device_name: str) -> str:
-    # Support requested clone-style suffix mapping: com.roblox.clien{suffix}
+    # Clone package naming requested by runtime: com.roblox.clien{suffix}
     suffix = device_name.replace("DEV_", "")
     if suffix.isdigit():
         return f"com.roblox.clien{suffix}"
     return f"com.roblox.{device_name}"
+
+
+def target_process_name() -> str:
+    # Process management target explicitly requested.
+    return "com.roblox.client"
 
 
 def clean_cookie_input(raw: str) -> str:
@@ -184,10 +189,11 @@ def clean_cookie_input(raw: str) -> str:
 
 def hard_reset_clone(device_name: str) -> tuple[int, str, str]:
     pkg = device_package(device_name)
-    code, out, err = run_shell(f"am force-stop {shlex.quote(pkg)}", root=True, timeout=20)
+    # Force-stop policy target requested as com.roblox.client.
+    code, out, err = run_shell(f"am force-stop {target_process_name()}", root=True, timeout=20)
     time.sleep(2)
     code2, out2, err2 = run_shell(
-        f"monkey -p {shlex.quote(pkg)} -c android.intent.category.LAUNCHER 1",
+        f"am start -n {shlex.quote(pkg)}/com.roblox.client.MainActivity",
         root=True,
         timeout=20,
     )
@@ -197,35 +203,47 @@ def hard_reset_clone(device_name: str) -> tuple[int, str, str]:
 
 
 def ensure_sqlite3() -> tuple[bool, str]:
-    code, out, err = run_shell("command -v sqlite3", root=False, timeout=10)
-    if code == 0 and out.strip():
-        return True, "sqlite3 found"
+    sqlite_abs = "/data/data/com.termux/files/usr/bin/sqlite3"
+    pkg_abs = "/data/data/com.termux/files/usr/bin/pkg"
 
-    code, out, err = run_shell("pkg install -y sqlite", root=False, timeout=180)
+    code, out, err = run_shell(f"test -x {shlex.quote(sqlite_abs)}", root=False, timeout=10)
     if code == 0:
-        return True, "sqlite installed"
+        return True, sqlite_abs
+
+    code, out, err = run_shell(f"{shlex.quote(pkg_abs)} install -y sqlite", root=False, timeout=180)
+    if code == 0:
+        return True, sqlite_abs
     return False, (err or out or "sqlite install failed")
 
 
 def inject_cookie_for_device(device_name: str, cookie_value: str) -> tuple[bool, str]:
-    ok, info = ensure_sqlite3()
+    ok, sqlite_bin_or_err = ensure_sqlite3()
     if not ok:
-        return False, f"sqlite3 unavailable: {info}"
+        return False, f"sqlite3 unavailable: {sqlite_bin_or_err}"
 
+    sqlite_bin = sqlite_bin_or_err
     clean_cookie = clean_cookie_input(cookie_value)
     if not clean_cookie:
         return False, "Cookie is empty"
 
     pkg = device_package(device_name)
     db_path = f"/data/data/{pkg}/app_webview/Default/Cookies"
+    parent_dir = f"/data/data/{pkg}/app_webview/Default"
+    temp_db = "/data/data/com.termux/files/home/temp_db"
 
-    # Hard-reset first to release DB locks.
-    stop_code, stop_out, stop_err = run_shell(f"am force-stop {shlex.quote(pkg)}", root=True, timeout=20)
+    # MUST stop first to release lock.
+    stop_code, stop_out, stop_err = run_shell(f"am force-stop {target_process_name()}", root=True, timeout=20)
     logger.info(f"cookie_pre_stop [{device_name}] code={stop_code} out={stop_out} err={stop_err}")
 
+    # Copy-edit-replace flow.
+    code, out, err = run_shell(f"cp {shlex.quote(db_path)} {shlex.quote(temp_db)}", root=True, timeout=20)
+    logger.info(f"cookie_copy [{device_name}] code={code} out={out} err={err}")
+    if code != 0:
+        return False, (err or out or "failed to copy cookies db")
+
     esc_cookie = clean_cookie.replace("'", "''")
-    delete_sql = "DELETE FROM cookies;"
-    insert_sql = (
+    sql_blob = (
+        "DELETE FROM cookies; "
         "INSERT INTO cookies "
         "(creation_utc, host_key, top_frame_site_key, name, value, encrypted_value, path, "
         "expires_utc, is_secure, is_httponly, last_access_utc, has_expires, is_persistent, "
@@ -234,18 +252,26 @@ def inject_cookie_for_device(device_name: str, cookie_value: str) -> tuple[bool,
         f"(strftime('%s','now')*1000000, '.roblox.com', '', '.ROBLOSECURITY', '{esc_cookie}', X'', '/', "
         "253402300799000000, 1, 1, strftime('%s','now')*1000000, 1, 1, 1, 0, 2, 443, 0);"
     )
-    sql_blob = f"{delete_sql} {insert_sql}"
 
-    # Entire sqlite execution is wrapped in su -c through run_shell(root=True).
-    cmd = f"test -f {shlex.quote(db_path)} && sqlite3 {shlex.quote(db_path)} \"{sql_blob}\""
-    code, out, err = run_shell(cmd, root=True, timeout=60)
+    code, out, err = run_shell(f"{shlex.quote(sqlite_bin)} {shlex.quote(temp_db)} \"{sql_blob}\"", root=True, timeout=60)
     logger.info(f"cookie_sqlite [{device_name}] code={code} out={out} err={err}")
     if code != 0:
-        return False, (err or out or "sqlite injection failed")
+        return False, (err or out or "sqlite edit failed")
+
+    code, owner_out, owner_err = run_shell(f"stat -c %u:%g {shlex.quote(parent_dir)}", root=True, timeout=15)
+    logger.info(f"cookie_owner [{device_name}] code={code} out={owner_out} err={owner_err}")
+    owner = owner_out.strip() if code == 0 and owner_out.strip() else "10167:10167"
+
+    code, out, err = run_shell(f"cp {shlex.quote(temp_db)} {shlex.quote(db_path)}", root=True, timeout=20)
+    logger.info(f"cookie_replace [{device_name}] code={code} out={out} err={err}")
+    if code != 0:
+        return False, (err or out or "failed to replace cookies db")
+
+    run_shell(f"chown {shlex.quote(owner)} {shlex.quote(db_path)} && chmod 600 {shlex.quote(db_path)}", root=True, timeout=15)
 
     time.sleep(2)
     launch_code, launch_out, launch_err = run_shell(
-        f"monkey -p {shlex.quote(pkg)} -c android.intent.category.LAUNCHER 1",
+        f"am start -n {shlex.quote(pkg)}/com.roblox.client.MainActivity",
         root=True,
         timeout=20,
     )
@@ -253,7 +279,7 @@ def inject_cookie_for_device(device_name: str, cookie_value: str) -> tuple[bool,
     if launch_code != 0:
         return False, (launch_err or launch_out or "clone launch failed")
 
-    return True, "Cookie injected and clone relaunched"
+    return True, "Cookie injected (copy-edit-replace) and clone relaunched"
 
 
 def inject_server_for_device(device_name: str, link: str) -> tuple[bool, str]:
