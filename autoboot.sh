@@ -1,26 +1,25 @@
 #!/data/data/com.termux/files/usr/bin/bash
 
-# Aegis V13: Скрипт автоматического деплоя и запуска
 PROJECT_DIR="$HOME/aegis_watchdog"
-
-echo "🛡 [Aegis V13] Начинаю установку системы..."
-
-# 1. Обновление пакетов Termux
-pkg update -y && pkg upgrade -y
-pkg install -y python git sqlite tsudo termux-api
-
-# 2. Подготовка директории
-mkdir -p "$PROJECT_DIR"
 cd "$PROJECT_DIR"
 
-# 3. Установка зависимостей
-echo "📦 Установка библиотек Python..."
-pip install --upgrade pip
-pip install aiogram loguru psutil requests aiohttp
+echo "🛡 [Aegis V13] Оптимизация окружения под Android..."
 
-# 4. Настройка прав (Wake Lock, чтобы Android не спал)
+# 1. Установка системных компиляторов и готовых бинарников
+pkg install -y python python-psutil python-cryptography clang make ndk-sysroot rust -y
+
+# 2. Установка легких библиотек через pip
+# Используем --no-cache-dir чтобы не забивать память телефона
+pip install --no-cache-dir aiogram loguru requests aiohttp
+
+# 3. Удержание системы (Wake Lock)
 termux-wake-lock
 
-# 5. Запуск
-echo "🚀 Запуск Aegis Watchdog..."
+# 4. Проверка конфига
+if [ ! -f "config.json" ]; then
+    echo "⚠️ Ошибка: Настрой config.json (токен и ID) перед запуском!"
+    exit 1
+fi
+
+echo "🚀 Все зависимости в норме. Запуск Aegis..."
 python bot.py
