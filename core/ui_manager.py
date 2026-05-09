@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import html
+
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from core.monitor import HealthSnapshot
@@ -19,10 +21,11 @@ def status_emoji(status: str) -> str:
     return "🔴"
 
 
-def main_menu_kb(device_names: list[str]) -> InlineKeyboardMarkup:
+def build_dashboard(devices_list: list[str]) -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup()
-    for dev in device_names:
-        kb.row(InlineKeyboardButton(f"🧷 {dev}", callback_data=f"dev:{dev}"))
+    for dev in devices_list:
+        safe_dev = html.escape(dev)
+        kb.row(InlineKeyboardButton(f"🧷 {safe_dev}", callback_data=f"dev:{dev}"))
     kb.row(
         InlineKeyboardButton("🚀 START ALL", callback_data="all:start"),
         InlineKeyboardButton("🛑 STOP ALL", callback_data="all:stop"),
@@ -55,30 +58,35 @@ def settings_menu_kb(silent_mode: bool) -> InlineKeyboardMarkup:
 
 
 def build_main_text(device_name: str, selected: str, silent_mode: bool) -> str:
+    safe_device_name = html.escape(device_name)
+    safe_selected = html.escape(selected)
+    silent_txt = "ON" if silent_mode else "OFF"
     return (
-        "```\n"
+        "<pre>\n"
         "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
-        f"┃ AEGIS V13 :: DIGITAL UNDERGROUND   ┃\n"
-        f"┃ HOST: {device_name:<29}┃\n"
-        f"┃ SELECTED: {selected:<25}┃\n"
-        f"┃ SILENT MODE: {('ON' if silent_mode else 'OFF'):<22}┃\n"
+        "┃ AEGIS V13 :: DIGITAL UNDERGROUND   ┃\n"
+        f"┃ HOST: {safe_device_name:<29}┃\n"
+        f"┃ SELECTED: {safe_selected:<25}┃\n"
+        f"┃ SILENT MODE: {silent_txt:<22}┃\n"
         "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n"
-        "```"
+        "</pre>"
     )
 
 
 def build_device_text(device_name: str, snap: HealthSnapshot, output_on: bool) -> str:
     emoji = status_emoji(snap.watchdog_status)
     out_state = "ON" if output_on else "OFF"
+    safe_name = html.escape(device_name)
+    safe_status = html.escape(snap.watchdog_status)
     return (
-        "```\n"
+        "<pre>\n"
         "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n"
-        f"┃ DEVICE: {device_name:<28}┃\n"
+        f"┃ DEVICE: {safe_name:<28}┃\n"
         "┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫\n"
         f"┃ RAM  [{progress_bar(snap.ram_percent)}] {snap.ram_percent:>5.1f}% ┃\n"
         f"┃ CPU  [{progress_bar(snap.cpu_percent)}] {snap.cpu_percent:>5.1f}% ┃\n"
-        f"┃ CON: {snap.tcp_connections:<4} THR: {snap.threads:<5} {emoji} {snap.watchdog_status:<8}┃\n"
+        f"┃ CON: {snap.tcp_connections:<4} THR: {snap.threads:<5} {emoji} {safe_status:<8}┃\n"
         f"┃ OUTPUT: {out_state:<28}┃\n"
         "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛\n"
-        "```"
+        "</pre>"
     )

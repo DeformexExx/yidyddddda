@@ -25,10 +25,10 @@ class SystemMonitor:
         self._last_cpu_idle: int | None = None
 
     async def set_process_priority(self, pid: int) -> None:
+        await run_bash(f"echo -17 > /proc/{pid}/oom_adj", root=True)
         code, _, err = await run_bash(f"echo -1000 > /proc/{pid}/oom_score_adj", root=True)
         if code != 0:
             logger.warning(f"Failed to set oom_score_adj for PID {pid}: {err}")
-        await run_bash(f"echo -17 > /proc/{pid}/oom_adj", root=True)
         code, _, err = await run_bash(f"renice -n -20 -p {pid}", root=True)
         if code != 0:
             logger.warning(f"Failed to set nice -20 for PID {pid}: {err}")
@@ -81,7 +81,7 @@ class SystemMonitor:
         return max(0.0, min(100.0, (1.0 - (delta_idle / delta_total)) * 100.0))
 
     async def get_clone_connections(self) -> int:
-        code, out, _ = await run_bash("cat /proc/net/tcp | grep ' 01 ' | wc -l", root=True)
+        code, out, _ = await run_bash("netstat -ant | grep ESTABLISHED | wc -l", root=True)
         if code != 0:
             return 0
         try:

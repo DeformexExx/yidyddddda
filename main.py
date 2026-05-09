@@ -1,4 +1,5 @@
 import asyncio
+import html
 import json
 import os
 import shlex
@@ -11,18 +12,13 @@ from typing import Optional
 
 import telebot
 from loguru import logger
+from telebot import util
 
 from core.bash_utils import run_bash
 from core.database import Database
 from core.injector import InjectionEngine
 from core.monitor import HealthSnapshot, SystemMonitor
-from core.ui_manager import (
-    build_device_text,
-    build_main_text,
-    device_menu_kb,
-    main_menu_kb,
-    settings_menu_kb,
-)
+from core.ui_manager import build_dashboard, build_device_text, build_main_text, device_menu_kb, settings_menu_kb
 
 CONFIG_PATH = Path("config.json")
 
@@ -80,7 +76,7 @@ def load_config(path: Path = CONFIG_PATH) -> AppConfig:
 
 
 def discover_devices(default_name: str) -> list[str]:
-    names = []
+    names: list[str] = []
     for p in Path(".").glob("DEV_*.json"):
         names.append(p.stem)
     if default_name not in names:
@@ -92,7 +88,7 @@ config = load_config()
 if not config.bot_token:
     raise RuntimeError("BOT_TOKEN is empty in config.json")
 
-bot = telebot.TeleBot(config.bot_token, parse_mode="Markdown")
+bot = telebot.TeleBot(config.bot_token, parse_mode="HTML")
 
 monitor = SystemMonitor()
 db = Database(db_path="storage.db", server_json_path="server.json")
@@ -100,9 +96,7 @@ injector = InjectionEngine()
 
 silent_mode = False
 sessions: dict[int, SessionState] = {}
-tracked_messages: dict[int, int] = {}  # chat_id -> message_id
-waiting_server_from_user: set[int] = set()
-waiting_cookie_from_user: set[int] = set()
+tracked_messages: dict[int, tuple[int, int]] = {}  # chat_id -> (user_id, message_id)
 devices: dict[str, DeviceState] = {name: DeviceState(name=name, pid=os.getpid()) for name in discover_devices(config.device_name)}
 
 
@@ -118,6 +112,19 @@ def is_admin(user_id: Optional[int]) -> bool:
     return user_id in config.admin_ids
 
 
+def safe_send(chat_id: int, text: str, reply_markup=None) -> None:
+    for chunk in util.smart_split(text, chars_per_string=3500):
+        bot.send_message(chat_id, chunk, reply_markup=reply_markup)
+        reply_markup = None
+
+
+def safe_edit(chat_id: int, message_id: int, text: str, reply_markup=None) -> None:
+    safe_text = text if "<pre>" in text else html.escape(text)
+    if len(safe_text) > 3500:
+        safe_text = safe_text[:3500]
+    bot.edit_message_text(safe_text, chat_id, message_id, reply_markup=reply_markup)
+
+
 def get_session(user_id: int) -> SessionState:
     if user_id not in sessions:
         first_device = next(iter(devices.keys()))
@@ -125,29 +132,19 @@ def get_session(user_id: int) -> SessionState:
     return sessions[user_id]
 
 
-def selected_device_for_message(message) -> str:
-    if not message.from_user:
-        return next(iter(devices.keys()))
-    return get_session(message.from_user.id).selected_device
-
-
 def startup_conflict_prevention() -> None:
-    # Root-confirmed environment: kill old python bot jobs before startup.
+    # Required bootstrap guard against 409 Conflict
     run_async(run_bash("pkill -f python", root=True, timeout=5))
 
 
-async def _shell(command: str, root: bool = False, timeout: int = 120) -> tuple[int, str, str]:
-    return await run_bash(command, root=root, timeout=timeout)
-
-
 def run_shell(command: str, root: bool = False, timeout: int = 120) -> tuple[int, str, str]:
-    return run_async(_shell(command, root=root, timeout=timeout))
+    return run_async(run_bash(command, root=root, timeout=timeout))
 
 
 def render_main(user_id: int) -> tuple[str, object]:
     state = get_session(user_id)
     txt = build_main_text(config.device_name, state.selected_device, silent_mode)
-    return txt, main_menu_kb(list(devices.keys()))
+    return txt, build_dashboard(list(devices.keys()))
 
 
 def render_device(device_name: str) -> tuple[str, object]:
@@ -158,18 +155,20 @@ def render_device(device_name: str) -> tuple[str, object]:
 
 def update_status_message(chat_id: int, user_id: int) -> None:
     state = get_session(user_id)
-    message_id = tracked_messages.get(chat_id)
-    if not message_id:
+    tracked = tracked_messages.get(chat_id)
+    if not tracked:
         return
+    _, message_id = tracked
+
     try:
         if state.view == "device":
             txt, kb = render_device(state.selected_device)
         elif state.view == "settings":
-            txt = "```\n[ SETTINGS MATRIX ]\n```"
+            txt = "<pre>[ SETTINGS MATRIX ]</pre>"
             kb = settings_menu_kb(silent_mode)
         else:
             txt, kb = render_main(user_id)
-        bot.edit_message_text(txt, chat_id, message_id, reply_markup=kb)
+        safe_edit(chat_id, message_id, txt, reply_markup=kb)
     except Exception as exc:
         logger.debug(f"auto-refresh edit skip: {exc}")
 
@@ -177,11 +176,9 @@ def update_status_message(chat_id: int, user_id: int) -> None:
 def auto_refresh_worker() -> None:
     while True:
         try:
-            for chat_id, message_id in list(tracked_messages.items()):
-                _ = message_id
-                # We can't recover user_id from chat safely; pick admin owner session if available.
-                user_id = next(iter(sessions.keys()), None)
-                if user_id is not None:
+            for chat_id, (user_id, _) in list(tracked_messages.items()):
+                state = sessions.get(user_id)
+                if state and state.view == "device":
                     update_status_message(chat_id, user_id)
             time.sleep(10)
         except Exception as exc:
@@ -192,7 +189,7 @@ def auto_refresh_worker() -> None:
 def perform_update(chat_id: int) -> None:
     code, out, err = run_shell("git rev-parse --is-inside-work-tree", root=False, timeout=15)
     if code != 0 or "true" not in out.lower():
-        bot.send_message(chat_id, "❌ Not a git repository")
+        safe_send(chat_id, html.escape("❌ Not a git repository"))
         return
 
     if config.git_repo_url:
@@ -200,14 +197,14 @@ def perform_update(chat_id: int) -> None:
 
     code, out, err = run_shell("git pull", root=False, timeout=120)
     if code != 0:
-        bot.send_message(chat_id, f"❌ Update failed\n```\n{err or out}\n```")
+        safe_send(chat_id, f"<pre>❌ Update failed\n{html.escape(err or out)}</pre>")
         return
 
     if "Already up to date" in out or "Already up-to-date" in out:
-        bot.send_message(chat_id, "✅ Already up to date")
+        safe_send(chat_id, html.escape("✅ Already up to date"))
         return
 
-    bot.send_message(chat_id, "📥 System updated, restarting...")
+    safe_send(chat_id, html.escape("📥 System updated, restarting..."))
     os.execv(sys.executable, ["python"] + sys.argv)
 
 
@@ -219,7 +216,7 @@ def cmd_start(message):
     state.view = "main"
     text, kb = render_main(message.from_user.id)
     msg = bot.send_message(message.chat.id, text, reply_markup=kb)
-    tracked_messages[message.chat.id] = msg.message_id
+    tracked_messages[message.chat.id] = (message.from_user.id, msg.message_id)
     state.message_id = msg.message_id
 
 
@@ -231,34 +228,38 @@ def cmd_status(message):
     state.view = "device"
     text, kb = render_device(state.selected_device)
     msg = bot.send_message(message.chat.id, text, reply_markup=kb)
-    tracked_messages[message.chat.id] = msg.message_id
+    tracked_messages[message.chat.id] = (message.from_user.id, msg.message_id)
     state.message_id = msg.message_id
 
 
 @bot.message_handler(commands=["exec"])
 def cmd_exec(message):
     if not is_admin(message.from_user.id if message.from_user else None):
-        bot.send_message(message.chat.id, "Access denied")
+        safe_send(message.chat.id, html.escape("Access denied"))
         return
-    dev = selected_device_for_message(message)
+
+    state = get_session(message.from_user.id)
+    dev = state.selected_device
+    pid = devices[dev].pid
+
     command = message.text.replace("/exec", "", 1).strip()
     if not command:
-        bot.send_message(message.chat.id, "Usage: /exec <shell_command>")
+        safe_send(message.chat.id, html.escape("Usage: /exec <shell_command>"))
         return
+
     code, out, err = run_shell(command, root=True, timeout=60)
     payload = out if out else err
     if not payload:
         payload = "(no output)"
-    if len(payload) > 3500:
-        payload = payload[:3500] + "..."
-    bot.send_message(message.chat.id, f"[{dev}] Exit: {code}\n\n```\n{payload}\n```")
+    safe_payload = html.escape(payload)
+    safe_send(message.chat.id, f"<pre>[{html.escape(dev)}|PID:{pid}] Exit: {code}\n\n{safe_payload}</pre>")
 
 
 @bot.message_handler(commands=["update"])
 def cmd_update(message):
     if not is_admin(message.from_user.id if message.from_user else None):
         return
-    bot.send_message(message.chat.id, "🔄 Updating...")
+    safe_send(message.chat.id, html.escape("🔄 Updating..."))
     perform_update(message.chat.id)
 
 
@@ -269,8 +270,8 @@ def cb_main(call):
     state = get_session(call.from_user.id)
     state.view = "main"
     text, kb = render_main(call.from_user.id)
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=kb)
-    tracked_messages[call.message.chat.id] = call.message.message_id
+    safe_edit(call.message.chat.id, call.message.message_id, text, reply_markup=kb)
+    tracked_messages[call.message.chat.id] = (call.from_user.id, call.message.message_id)
     bot.answer_callback_query(call.id)
 
 
@@ -284,8 +285,8 @@ def cb_device(call):
     state.selected_device = dev
     state.view = "device"
     text, kb = render_device(dev)
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=kb)
-    tracked_messages[call.message.chat.id] = call.message.message_id
+    safe_edit(call.message.chat.id, call.message.message_id, text, reply_markup=kb)
+    tracked_messages[call.message.chat.id] = (call.from_user.id, call.message.message_id)
     bot.answer_callback_query(call.id, f"Selected {dev}")
 
 
@@ -293,13 +294,8 @@ def cb_device(call):
 def cb_settings(call):
     state = get_session(call.from_user.id)
     state.view = "settings"
-    bot.edit_message_text(
-        "```\n[ SETTINGS MATRIX ]\n```",
-        call.message.chat.id,
-        call.message.message_id,
-        reply_markup=settings_menu_kb(silent_mode),
-    )
-    tracked_messages[call.message.chat.id] = call.message.message_id
+    safe_edit(call.message.chat.id, call.message.message_id, "<pre>[ SETTINGS MATRIX ]</pre>", reply_markup=settings_menu_kb(silent_mode))
+    tracked_messages[call.message.chat.id] = (call.from_user.id, call.message.message_id)
     bot.answer_callback_query(call.id)
 
 
@@ -313,8 +309,6 @@ def cb_set_update(call):
 def cb_set_silent(call):
     global silent_mode
     silent_mode = not silent_mode
-    state = get_session(call.from_user.id)
-    state.view = "settings"
     bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=settings_menu_kb(silent_mode))
     bot.answer_callback_query(call.id, f"Silent {'ON' if silent_mode else 'OFF'}")
 
@@ -346,9 +340,9 @@ def cb_actions(call):
         devices[dev].output_on = False
         bot.answer_callback_query(call.id, f"{dev} stopped")
     elif action == "cookie":
-        bot.answer_callback_query(call.id, "Use /add_cookie then select in menu")
+        bot.answer_callback_query(call.id, "Cookie slot ready")
     elif action == "server":
-        bot.answer_callback_query(call.id, "Use /add_server then select in menu")
+        bot.answer_callback_query(call.id, "Server slot ready")
 
 
 def monitor_worker() -> None:
@@ -365,10 +359,10 @@ def monitor_worker() -> None:
                     con = await monitor.get_clone_connections()
                     if con <= monitor.tcp_zombie_threshold:
                         await monitor.restart_roblox()
-                        if not silent_mode and sessions:
+                        if not silent_mode:
                             first_chat = next(iter(tracked_messages.keys()), None)
                             if first_chat:
-                                bot.send_message(first_chat, f"⚠️ Auto-restart triggered on {dev.name} (CON={con})")
+                                safe_send(first_chat, html.escape(f"⚠️ Restarting device {dev.name} (CON={con})"))
                 await asyncio.sleep(10)
             except Exception as exc:
                 logger.exception(f"monitor_worker error: {exc}")
