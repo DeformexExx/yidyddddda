@@ -4,7 +4,6 @@ import asyncio
 import html
 import json
 import shlex
-import subprocess
 import sys
 import threading
 import time
@@ -20,7 +19,8 @@ from core.bash_utils import run_bash
 from core.monitor import SystemMonitor
 from core.ui_manager import build_dashboard, build_main_text, get_device_page, settings_menu_kb
 
-CONFIG_PATH = Path("config.json")
+PROJECT_ROOT = "/data/data/com.termux/files/home/aegis_watchdog"
+CONFIG_PATH = Path(PROJECT_ROOT) / "config.json"
 
 
 @dataclass
@@ -184,51 +184,43 @@ def exec_cmd(message):
     safe_send(message.chat.id, f"<pre>[{html.escape(dev.name)}|PID:{dev.pid}] Exit: {code}\n{payload}</pre>")
 
 
-def spawn_detached_update() -> Path:
-    project_dir = Path.cwd()
-    script_path = project_dir / ".aegis_detached_update.sh"
+def perform_update() -> tuple[int, str, str]:
+    os.chdir(PROJECT_ROOT)
+    project_dir = shlex.quote(PROJECT_ROOT)
     current_pid = os.getpid()
-    python_bin = sys.executable
-    main_script = Path(sys.argv[0]).name or "bot.py"
 
-    script = f"""#!/data/data/com.termux/files/usr/bin/bash
-set +e
-cd {shlex.quote(str(project_dir))} || exit 1
-export PATH=/data/data/com.termux/files/usr/bin:/data/data/com.termux/files/usr/bin/applets:/system/bin:/system/xbin
-export LD_LIBRARY_PATH=/data/data/com.termux/files/usr/lib
-export HOME=/data/data/com.termux/files/home
-/system/bin/su -c \"for p in \\$(pgrep -f python); do [ \\\"\\$p\\\" != \\\"{current_pid}\\\" ] && kill -9 \\"\\$p\\"; done; pkill -9 -f com.roblox.client || true; /system/bin/am force-stop com.roblox.client || true\"
-sleep 1
-/system/bin/su -c \"rm -f watchdog.log; find . -type d -name __pycache__ -prune -exec rm -rf {{}} +; find . -type f -name '*.tmp' -delete\"
-/system/bin/su -c \"chown -R \\$(id -u):\\$(id -g) {shlex.quote(str(project_dir))}\"
-/system/bin/su -c \"chmod -R 755 .\"
-git fetch --all
-git reset --hard origin/main
-git clean -fd
-/system/bin/su -c \"chown -R \\$(id -u):\\$(id -g) {shlex.quote(str(project_dir))}\"
-/system/bin/su -c \"chmod -R 755 .\"
-/system/bin/su -c \"for p in \\$(pgrep -f python); do kill -9 \\"\\$p\\"; done\" || true
-nohup {shlex.quote(python_bin)} {shlex.quote(main_script)} >> watchdog.log 2>&1 &
-"""
-    script_path.write_text(script, encoding="utf-8")
-    os.chmod(script_path, 0o755)
-    return script_path
+    shell(
+        f"for p in $(pgrep -f python); do [ \"$p\" != \"{current_pid}\" ] && kill -9 $p; done; "
+        "pkill -9 -f com.roblox.client || true; /system/bin/am force-stop com.roblox.client || true",
+        root=True,
+        timeout=30,
+    )
+    shell(
+        f"rm -f {project_dir}/watchdog.log; "
+        f"find {project_dir} -type d -name __pycache__ -prune -exec rm -rf {{}} +; "
+        f"find {project_dir} -type f -name '*.tmp' -delete",
+        root=True,
+        timeout=30,
+    )
+    shell(f"chown -R $(id -u):$(id -g) {project_dir}", root=True, timeout=120)
+    shell(f"chmod -R 755 {project_dir}", root=True, timeout=120)
+    cmd = "git -c safe.directory='*' fetch --all && git -c safe.directory='*' reset --hard origin/main && git clean -fd"
+    code, out, err = shell(cmd, root=False, timeout=240)
+    shell(f"chown -R $(id -u):$(id -g) {project_dir}", root=True, timeout=120)
+    shell(f"chmod -R 755 {project_dir}", root=True, timeout=120)
+    return code, out, err
 
 
 @bot.message_handler(commands=["update"])
 def update_cmd(message):
     if not is_admin(message.from_user.id if message.from_user else None):
         return
-    script_path = spawn_detached_update()
-    safe_send(message.chat.id, html.escape("Detached update spawned; exiting for restart..."))
-    subprocess.Popen(
-        ["/data/data/com.termux/files/usr/bin/bash", str(script_path)],
-        cwd=str(Path.cwd()),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    os._exit(0)
+    code, out, err = perform_update()
+    if code != 0:
+        safe_send(message.chat.id, f"<pre>Update failed\n{html.escape(err or out)}</pre>")
+        return
+    safe_send(message.chat.id, html.escape("System updated, restarting..."))
+    os.execv(sys.executable, [sys.executable, str(Path(PROJECT_ROOT) / "bot.py")])
 
 
 @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("dev:"))
@@ -271,16 +263,11 @@ def toggle_silent(call):
 
 @bot.callback_query_handler(func=lambda c: c.data == "set:update")
 def update_btn(call):
-    script_path = spawn_detached_update()
-    bot.answer_callback_query(call.id, "Detached update spawned")
-    subprocess.Popen(
-        ["/data/data/com.termux/files/usr/bin/bash", str(script_path)],
-        cwd=str(Path.cwd()),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    os._exit(0)
+    bot.answer_callback_query(call.id, "Updating...")
+    code, out, err = perform_update()
+    if code == 0:
+        os.execv(sys.executable, [sys.executable, str(Path(PROJECT_ROOT) / "bot.py")])
+    bot.answer_callback_query(call.id, "Update failed")
 
 
 @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("all:"))
