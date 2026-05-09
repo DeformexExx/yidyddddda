@@ -20,10 +20,16 @@ def _status_emoji(status: str) -> str:
     return "🔴"
 
 
-def build_dashboard(devices_list: list[str], *_ignored, **_ignored_kw) -> InlineKeyboardMarkup:
+def build_dashboard(devices_list, device_name=None, snapshot=None, active_cookie=None, active_server=None) -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup()
-    for dev in devices_list:
+
+    if isinstance(devices_list, (list, tuple, set)):
+        for dev in devices_list:
+            kb.row(InlineKeyboardButton(f"📱 {html.escape(str(dev))}", callback_data=f"dev:{dev}"))
+    else:
+        dev = str(device_name or devices_list)
         kb.row(InlineKeyboardButton(f"📱 {html.escape(dev)}", callback_data=f"dev:{dev}"))
+
     kb.row(
         InlineKeyboardButton("🚀 START ALL", callback_data="all:start"),
         InlineKeyboardButton("🛑 STOP ALL", callback_data="all:stop"),
