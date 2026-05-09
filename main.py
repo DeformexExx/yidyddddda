@@ -17,7 +17,7 @@ from telebot import util
 from core.bash_utils import run_bash
 from core.database import Database
 from core.injector import InjectionEngine
-from core.monitor import HealthSnapshot, SystemMonitor
+from core.monitor import SystemMonitor
 from core.ui_manager import build_dashboard, build_device_text, build_main_text, device_menu_kb, settings_menu_kb
 
 CONFIG_PATH = Path("config.json")
@@ -148,7 +148,7 @@ def render_main(user_id: int) -> tuple[str, object]:
 
 
 def render_device(device_name: str) -> tuple[str, object]:
-    snap: HealthSnapshot = run_async(monitor.snapshot(devices[device_name].pid))
+    snap = run_async(monitor.snapshot(devices[device_name].pid))
     txt = build_device_text(device_name, snap, devices[device_name].output_on)
     return txt, device_menu_kb(device_name)
 
