@@ -187,27 +187,28 @@ def exec_cmd(message):
 def perform_update() -> tuple[int, str, str]:
     os.chdir(PROJECT_ROOT)
     project_dir = shlex.quote(PROJECT_ROOT)
-    current_pid = os.getpid()
+    script_path = Path(PROJECT_ROOT) / "update_nuclear.sh"
+    python_bin = shlex.quote(sys.executable)
 
-    shell(
-        f"for p in $(pgrep -f python); do [ \"$p\" != \"{current_pid}\" ] && kill -9 $p; done; "
-        "pkill -9 -f com.roblox.client || true; /system/bin/am force-stop com.roblox.client || true",
-        root=True,
-        timeout=30,
+    script = f"""#!/data/data/com.termux/files/usr/bin/bash
+set +e
+cd {project_dir} || exit 1
+export PATH=/data/data/com.termux/files/usr/bin:/data/data/com.termux/files/usr/bin/applets:/system/bin:/system/xbin
+export LD_LIBRARY_PATH=/data/data/com.termux/files/usr/lib
+export HOME=/data/data/com.termux/files/home
+/system/bin/su -c \"pkill -f python || true\"
+git -c safe.directory='*' fetch --all && git -c safe.directory='*' reset --hard origin/main && git clean -fd
+/system/bin/su -c \"rm -rf watchdog.log __pycache__\"
+/system/bin/su -c \"chown -R \\$(id -u):\\$(id -g) .\"
+nohup {python_bin} {shlex.quote(str(Path(PROJECT_ROOT) / 'bot.py'))} >> watchdog.log 2>&1 &
+"""
+    script_path.write_text(script, encoding="utf-8")
+    os.chmod(script_path, 0o755)
+    code, out, err = shell(
+        f"nohup /data/data/com.termux/files/usr/bin/bash {shlex.quote(str(script_path))} > /dev/null 2>&1 &",
+        root=False,
+        timeout=10,
     )
-    shell(
-        f"rm -f {project_dir}/watchdog.log; "
-        f"find {project_dir} -type d -name __pycache__ -prune -exec rm -rf {{}} +; "
-        f"find {project_dir} -type f -name '*.tmp' -delete",
-        root=True,
-        timeout=30,
-    )
-    shell(f"chown -R $(id -u):$(id -g) {project_dir}", root=True, timeout=120)
-    shell(f"chmod -R 755 {project_dir}", root=True, timeout=120)
-    cmd = "git -c safe.directory='*' fetch --all && git -c safe.directory='*' reset --hard origin/main && git clean -fd"
-    code, out, err = shell(cmd, root=False, timeout=240)
-    shell(f"chown -R $(id -u):$(id -g) {project_dir}", root=True, timeout=120)
-    shell(f"chmod -R 755 {project_dir}", root=True, timeout=120)
     return code, out, err
 
 
@@ -219,8 +220,8 @@ def update_cmd(message):
     if code != 0:
         safe_send(message.chat.id, f"<pre>Update failed\n{html.escape(err or out)}</pre>")
         return
-    safe_send(message.chat.id, html.escape("System updated, restarting..."))
-    os.execv(sys.executable, [sys.executable, str(Path(PROJECT_ROOT) / "bot.py")])
+    safe_send(message.chat.id, html.escape("Detached update started; restarting..."))
+    os._exit(0)
 
 
 @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("dev:"))
@@ -266,7 +267,7 @@ def update_btn(call):
     bot.answer_callback_query(call.id, "Updating...")
     code, out, err = perform_update()
     if code == 0:
-        os.execv(sys.executable, [sys.executable, str(Path(PROJECT_ROOT) / "bot.py")])
+        os._exit(0)
     bot.answer_callback_query(call.id, "Update failed")
 
 

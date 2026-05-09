@@ -227,48 +227,106 @@ def inject_cookie_for_device(device_name: str, cookie_value: str) -> tuple[bool,
     if not clean_cookie:
         return False, "Cookie is empty"
 
-    pkg = "com.roblox.client"
     db_path = "/data/data/com.roblox.client/app_webview/Default/Cookies"
     parent_dir = "/data/data/com.roblox.client/app_webview/Default"
     temp_db = "/sdcard/Cookies"
 
-    # MUST stop first to release lock. This becomes:
-    # /system/bin/su -c "/system/bin/am force-stop com.roblox.client"
-    stop_code, stop_out, stop_err = run_shell(f"/system/bin/am force-stop {target_process_name()}", root=True, timeout=20)
+    stop_code, stop_out, stop_err = run_shell("/system/bin/am force-stop com.roblox.client", root=True, timeout=20)
     logger.info(f"cookie_pre_stop [{device_name}] code={stop_code} out={stop_out} err={stop_err}")
     if stop_code != 0:
         return False, (stop_err or stop_out or "force-stop failed; cookie db is still locked by Roblox")
 
-    # SDCard relay flow.
     code, out, err = run_shell(f"cp {shlex.quote(db_path)} {shlex.quote(temp_db)} && chmod 777 {shlex.quote(temp_db)}", root=True, timeout=20)
     logger.info(f"cookie_copy [{device_name}] code={code} out={out} err={err}")
     if code != 0:
         return False, (err or out or "failed to copy cookies db")
 
+    pragma_cmd = f"{shlex.quote(sqlite_bin)} -separator '|' {shlex.quote(temp_db)} \"PRAGMA table_info(cookies);\""
+    code, pragma_out, pragma_err = run_shell(pragma_cmd, root=True, timeout=30)
+    if code != 0 or not pragma_out.strip():
+        return False, (pragma_err or pragma_out or "PRAGMA table_info failed")
+
+    columns: list[dict[str, str | int]] = []
+    for line in pragma_out.splitlines():
+        parts = line.split("|", 5)
+        if len(parts) < 6:
+            continue
+        columns.append(
+            {
+                "name": parts[1],
+                "type": parts[2] or "",
+                "notnull": 1 if parts[3] == "1" else 0,
+                "dflt": parts[4],
+            }
+        )
+
+    if not columns:
+        return False, "cookies schema is empty"
+
     esc_cookie = clean_cookie.replace("'", "''")
     creation_utc = "((strftime('%s','now') + 11644473600) * 1000000)"
     expires_utc = "((strftime('%s','now') + 11644473600 + 31536000) * 1000000)"
-    sql_template = (
-        "INSERT INTO cookies (creation_utc, host_key, top_frame_site_key, name, value, encrypted_value, path, "
-        "expires_utc, is_secure, is_httponly, last_access_utc, has_expires, is_persistent, samesite, "
-        "source_port, priority, last_update_utc, source_scheme, source_type, has_cross_site_ancestor) "
-        "VALUES (?, ?, '', ?, ?, '', '/', ?, 1, 1, ?, 1, 1, -1, 443, 1, ?, 2, 0, 0)"
-    )
-    sql_values = (
-        creation_utc,
-        "'.roblox.com'",
-        "'.ROBLOSECURITY'",
-        f"'{esc_cookie}'",
-        expires_utc,
-        creation_utc,
-        creation_utc,
-    )
-    sql_blob = "DELETE FROM cookies; " + sql_template.replace("?", "{}").format(*sql_values) + ";"
+    provided: dict[str, str] = {
+        "creation_utc": creation_utc,
+        "host_key": "'.roblox.com'",
+        "name": "'.ROBLOSECURITY'",
+        "value": f"'{esc_cookie}'",
+        "encrypted_value": "''",
+        "path": "'/'",
+        "expires_utc": expires_utc,
+        "is_secure": "1",
+        "is_httponly": "1",
+        "last_access_utc": creation_utc,
+        "has_expires": "1",
+        "is_persistent": "1",
+        "priority": "1",
+        "samesite": "-1",
+        "source_port": "443",
+        "last_update_utc": creation_utc,
+        "source_scheme": "2",
+        "source_type": "0",
+        "has_cross_site_ancestor": "0",
+        "top_frame_site_key": "''",
+        "is_same_party": "0",
+    }
 
-    code, out, err = run_shell(f"{shlex.quote(sqlite_bin)} {shlex.quote(temp_db)} \"{sql_blob}\"", root=True, timeout=60)
+    insert_cols: list[str] = []
+    insert_vals: list[str] = []
+    for col in columns:
+        name = str(col["name"])
+        col_type = str(col["type"]).upper()
+        notnull = int(col["notnull"])
+        dflt = str(col["dflt"] or "")
+
+        if name in provided:
+            val = provided[name]
+        elif notnull:
+            if dflt:
+                val = dflt
+            elif any(k in col_type for k in ("INT", "REAL", "NUM", "BOOL")):
+                val = "0"
+            else:
+                val = "''"
+        else:
+            continue
+
+        insert_cols.append(name)
+        insert_vals.append(val)
+
+    if not insert_cols:
+        return False, "no injectable columns detected"
+
+    insert_sql = f"INSERT INTO cookies ({', '.join(insert_cols)}) VALUES ({', '.join(insert_vals)})"
+    sql_blob = (
+        "DELETE FROM cookies WHERE name = '.ROBLOSECURITY'; "
+        f"{insert_sql}; "
+        "REINDEX cookies; VACUUM;"
+    )
+
+    code, out, err = run_shell(f"{shlex.quote(sqlite_bin)} {shlex.quote(temp_db)} \"{sql_blob}\"", root=True, timeout=90)
     logger.info(f"cookie_sqlite [{device_name}] code={code} out={out} err={err}")
     if code != 0:
-        return False, (err or out or "sqlite edit failed")
+        return False, (err or out or "sqlite dynamic insert failed")
 
     code, owner_out, owner_err = run_shell(f"stat -c %u:%g {shlex.quote(parent_dir)}", root=True, timeout=15)
     logger.info(f"cookie_owner [{device_name}] code={code} out={owner_out} err={owner_err}")
@@ -283,7 +341,7 @@ def inject_cookie_for_device(device_name: str, cookie_value: str) -> tuple[bool,
 
     time.sleep(2)
     launch_code, launch_out, launch_err = run_shell(
-        "/system/bin/am start -n com.roblox.client/com.roblox.client.startup.ActivitySplash",
+        "/system/bin/am start -n com.roblox.client/.startup.ActivitySplash",
         root=True,
         timeout=20,
     )
@@ -291,7 +349,7 @@ def inject_cookie_for_device(device_name: str, cookie_value: str) -> tuple[bool,
     if launch_code != 0:
         return False, (launch_err or launch_out or "clone launch failed")
 
-    return True, "Cookie injected (copy-edit-replace) and clone relaunched"
+    return True, "Cookie injected (dynamic schema) and clone relaunched"
 
 
 def inject_server_for_device(device_name: str, link: str) -> tuple[bool, str]:
@@ -354,40 +412,27 @@ def auto_refresh_worker() -> None:
 def perform_update(chat_id: int) -> None:
     os.chdir(PROJECT_ROOT)
     project_dir = shlex.quote(PROJECT_ROOT)
-    current_pid = os.getpid()
+    script_path = Path(PROJECT_ROOT) / "update_nuclear.sh"
+    python_bin = shlex.quote(sys.executable)
 
-    safe_send(chat_id, html.escape("☢️ Nuclear update started..."))
+    script = f"""#!/data/data/com.termux/files/usr/bin/bash
+set +e
+cd {project_dir} || exit 1
+export PATH=/data/data/com.termux/files/usr/bin:/data/data/com.termux/files/usr/bin/applets:/system/bin:/system/xbin
+export LD_LIBRARY_PATH=/data/data/com.termux/files/usr/lib
+export HOME=/data/data/com.termux/files/home
+/system/bin/su -c \"pkill -f python || true\"
+git -c safe.directory='*' fetch --all && git -c safe.directory='*' reset --hard origin/main && git clean -fd
+/system/bin/su -c \"rm -rf watchdog.log __pycache__\"
+/system/bin/su -c \"chown -R \\$(id -u):\\$(id -g) .\"
+nohup {python_bin} {shlex.quote(str(Path(PROJECT_ROOT) / 'main.py'))} >> watchdog.log 2>&1 &
+"""
+    script_path.write_text(script, encoding="utf-8")
+    os.chmod(script_path, 0o755)
 
-    run_shell(
-        f"for p in $(pgrep -f python); do [ \"$p\" != \"{current_pid}\" ] && kill -9 $p; done; "
-        "pkill -9 -f com.roblox.client || true; /system/bin/am force-stop com.roblox.client || true",
-        root=True,
-        timeout=30,
-    )
-    run_shell(
-        f"rm -f {project_dir}/watchdog.log; "
-        f"find {project_dir} -type d -name __pycache__ -prune -exec rm -rf {{}} +; "
-        f"find {project_dir} -type f -name '*.tmp' -delete",
-        root=True,
-        timeout=30,
-    )
-    run_shell(f"chown -R $(id -u):$(id -g) {project_dir}", root=True, timeout=120)
-    run_shell(f"chmod -R 755 {project_dir}", root=True, timeout=120)
-
-    if config.git_repo_url:
-        run_shell(f"git -c safe.directory='*' remote set-url origin {shlex.quote(config.git_repo_url)}", root=False, timeout=20)
-
-    cmd = "git -c safe.directory='*' fetch --all && git -c safe.directory='*' reset --hard origin/main && git clean -fd"
-    code, out, err = run_shell(cmd, root=False, timeout=240)
-    if code != 0:
-        safe_send(chat_id, f"<pre>❌ Update failed\n{html.escape(err or out)}</pre>")
-        return
-
-    run_shell(f"chown -R $(id -u):$(id -g) {project_dir}", root=True, timeout=120)
-    run_shell(f"chmod -R 755 {project_dir}", root=True, timeout=120)
-
-    safe_send(chat_id, html.escape("📥 Nuclear update complete, restarting..."))
-    os.execv(sys.executable, [sys.executable, str(Path(PROJECT_ROOT) / "main.py")])
+    safe_send(chat_id, html.escape("☢️ Detached nuclear update started..."))
+    run_shell(f"nohup /data/data/com.termux/files/usr/bin/bash {shlex.quote(str(script_path))} > /dev/null 2>&1 &", root=False, timeout=10)
+    os._exit(0)
 
 
 @bot.message_handler(commands=["start", "menu"])
