@@ -4,19 +4,19 @@ import os
 import shlex
 import stat
 import sys
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from aiogram import Bot, Dispatcher, executor, types
-from aiogram.contrib.fsm_storage.memory import MemoryStorage
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+import telebot
 from loguru import logger
+from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from core.database import Database
 from core.injector import InjectionEngine
 from core.monitor import SystemMonitor
-
 
 CONFIG_PATH = Path("config.json")
 
@@ -40,6 +40,7 @@ DEFAULT_CONFIG = {
 def load_config(path: Path = CONFIG_PATH) -> AppConfig:
     if not path.exists():
         path.write_text(json.dumps(DEFAULT_CONFIG, ensure_ascii=False, indent=2), encoding="utf-8")
+
     raw = json.loads(path.read_text(encoding="utf-8"))
     merged = {**DEFAULT_CONFIG, **raw}
 
@@ -62,9 +63,7 @@ config = load_config()
 if not config.bot_token:
     raise RuntimeError("BOT_TOKEN is empty in config.json")
 
-bot = Bot(token=config.bot_token)
-dp = Dispatcher(bot, storage=MemoryStorage())
-
+bot = telebot.TeleBot(config.bot_token, parse_mode="Markdown")
 
 db = Database(db_path="storage.db", server_json_path="server.json")
 injector = InjectionEngine()
@@ -72,6 +71,10 @@ monitor = SystemMonitor()
 
 waiting_server_from_user: set[int] = set()
 waiting_cookie_from_user: set[int] = set()
+
+
+def run_async(coro):
+    return asyncio.run(coro)
 
 
 def is_admin(user_id: Optional[int]) -> bool:
@@ -89,39 +92,62 @@ def progress_bar(percent: float, length: int = 20) -> str:
 
 
 def main_menu_kb() -> InlineKeyboardMarkup:
-    kb = InlineKeyboardMarkup(row_width=1)
-    kb.add(InlineKeyboardButton(text="🔄 Refresh Status", callback_data="menu:status"))
-    kb.add(InlineKeyboardButton(text="🖥 Server Manager", callback_data="menu:servers"))
-    kb.add(InlineKeyboardButton(text="🍪 Cookie Manager", callback_data="menu:cookies"))
-    kb.add(InlineKeyboardButton(text="♻️ Update", callback_data="sys:update"))
+    kb = InlineKeyboardMarkup()
+    kb.row(InlineKeyboardButton("🔄 Refresh Status", callback_data="menu:status"))
+    kb.row(InlineKeyboardButton("🖥 Server Manager", callback_data="menu:servers"))
+    kb.row(InlineKeyboardButton("🍪 Cookie Manager", callback_data="menu:cookies"))
+    kb.row(InlineKeyboardButton("♻️ Update", callback_data="sys:update"))
     return kb
 
 
 def servers_menu_kb(servers, active_server_name: Optional[str]) -> InlineKeyboardMarkup:
-    kb = InlineKeyboardMarkup(row_width=2)
+    kb = InlineKeyboardMarkup()
     for s in servers:
         prefix = "✅ " if active_server_name == s.name else ""
         kb.row(
-            InlineKeyboardButton(text=f"{prefix}{s.name}", callback_data=f"srv:select:{s.name}"),
-            InlineKeyboardButton(text="🗑", callback_data=f"srv:del:{s.name}"),
+            InlineKeyboardButton(f"{prefix}{s.name}", callback_data=f"srv:select:{s.name}"),
+            InlineKeyboardButton("🗑", callback_data=f"srv:del:{s.name}"),
         )
-    kb.add(InlineKeyboardButton(text="⬅ Back", callback_data="menu:main"))
+    kb.row(InlineKeyboardButton("⬅ Back", callback_data="menu:main"))
     return kb
 
 
 def cookies_menu_kb(cookies, active_cookie_name: Optional[str]) -> InlineKeyboardMarkup:
-    kb = InlineKeyboardMarkup(row_width=2)
+    kb = InlineKeyboardMarkup()
     for c in cookies:
         prefix = "✅ " if active_cookie_name == c.nickname else ""
         kb.row(
-            InlineKeyboardButton(text=f"{prefix}{c.nickname}", callback_data=f"ck:select:{c.nickname}"),
-            InlineKeyboardButton(text="🗑", callback_data=f"ck:del:{c.nickname}"),
+            InlineKeyboardButton(f"{prefix}{c.nickname}", callback_data=f"ck:select:{c.nickname}"),
+            InlineKeyboardButton("🗑", callback_data=f"ck:del:{c.nickname}"),
         )
-    kb.add(InlineKeyboardButton(text="⬅ Back", callback_data="menu:main"))
+    kb.row(InlineKeyboardButton("⬅ Back", callback_data="menu:main"))
     return kb
 
 
-async def run_shell(command: str, root: bool = False, timeout: int = 120) -> tuple[int, str, str]:
+def status_text() -> str:
+    snap = run_async(monitor.snapshot())
+    active_cookie = run_async(db.get_setting("active_cookie_name", default="None"))
+    active_server = run_async(db.get_setting("active_server_name", default="None"))
+    tcp_status = "OK" if snap.watchdog_status == "ACTIVE" else snap.watchdog_status
+
+    dashboard = (
+        f"🛡 [{config.device_name}] SYSTEM DASHBOARD\n"
+        "--------------------------\n"
+        f"📈 RAM: [{progress_bar(snap.ram_percent)}] {snap.ram_percent:.0f}%\n"
+        f"🧬 CPU: [{progress_bar(snap.cpu_percent)}] {snap.cpu_percent:.0f}%\n"
+        f"🌐 TCP: {snap.tcp_connections} Active (Status: {tcp_status})\n"
+        "--------------------------\n"
+        f"🍪 Active: {active_cookie or 'None'}\n"
+        f"🔗 Server: {active_server or 'None'}"
+    )
+    return f"```\n{dashboard}\n```"
+
+
+def run_shell(command: str, root: bool = False, timeout: int = 120) -> tuple[int, str, str]:
+    return run_async(_run_shell_async(command, root=root, timeout=timeout))
+
+
+async def _run_shell_async(command: str, root: bool = False, timeout: int = 120) -> tuple[int, str, str]:
     final_command = f"su -c {shlex.quote(command)}" if root else command
     proc = await asyncio.create_subprocess_shell(
         final_command,
@@ -171,109 +197,197 @@ def restore_core_permissions(snapshot: dict[str, tuple[int, int, int]]) -> None:
             pass
 
 
-async def status_text() -> str:
-    snap = await monitor.snapshot()
-    active_cookie = await db.get_setting("active_cookie_name", default="None")
-    active_server = await db.get_setting("active_server_name", default="None")
-    tcp_status = "OK" if snap.watchdog_status == "ACTIVE" else snap.watchdog_status
-
-    dashboard = (
-        f"🛡 [{config.device_name}] SYSTEM DASHBOARD\n"
-        "--------------------------\n"
-        f"📈 RAM: [{progress_bar(snap.ram_percent)}] {snap.ram_percent:.0f}%\n"
-        f"🧬 CPU: [{progress_bar(snap.cpu_percent)}] {snap.cpu_percent:.0f}%\n"
-        f"🌐 TCP: {snap.tcp_connections} Active (Status: {tcp_status})\n"
-        "--------------------------\n"
-        f"🍪 Active: {active_cookie or 'None'}\n"
-        f"🔗 Server: {active_server or 'None'}"
-    )
-    return f"```\n{dashboard}\n```"
-
-
-async def perform_update(message: types.Message) -> None:
-    code, out, err = await run_shell("git rev-parse --is-inside-work-tree", root=False, timeout=15)
+def perform_update(chat_id: int) -> None:
+    code, out, err = run_shell("git rev-parse --is-inside-work-tree", root=False, timeout=15)
     if code != 0 or "true" not in out.lower():
-        await message.answer("❌ Текущая папка не является Git-репозиторием.")
+        bot.send_message(chat_id, "❌ Текущая папка не является Git-репозиторием.")
         return
 
     if config.git_repo_url:
-        await run_shell(f"git remote set-url origin {shlex.quote(config.git_repo_url)}", root=False, timeout=20)
+        run_shell(f"git remote set-url origin {shlex.quote(config.git_repo_url)}", root=False, timeout=20)
 
-    perms = await asyncio.to_thread(snapshot_core_permissions)
-    code, out, err = await run_shell("git pull", root=False, timeout=120)
-    await asyncio.to_thread(restore_core_permissions, perms)
+    perms = snapshot_core_permissions()
+    code, out, err = run_shell("git pull", root=False, timeout=120)
+    restore_core_permissions(perms)
 
     if code != 0:
-        await message.answer(f"❌ Ошибка обновления:\n```\n{err or out}\n```", parse_mode="Markdown")
+        bot.send_message(chat_id, f"❌ Ошибка обновления:\n```\n{err or out}\n```")
         return
 
     pull_out = (out or err or "").strip()
     if "Already up to date" in pull_out or "Already up-to-date" in pull_out:
-        await message.answer("✅ У вас уже установлена последняя версия.")
+        bot.send_message(chat_id, "✅ У вас уже установлена последняя версия.")
         return
 
-    await message.answer("📥 Обновления скачаны. Перезагружаюсь...")
+    bot.send_message(chat_id, "📥 Обновления скачаны. Перезагружаюсь...")
     os.execv(sys.executable, ["python"] + sys.argv)
 
 
-@dp.message_handler(commands=["start", "menu"])
-async def cmd_start(message: types.Message):
-    await message.answer(await status_text(), reply_markup=main_menu_kb(), parse_mode="Markdown")
+@bot.message_handler(commands=["start", "menu"])
+def cmd_start(message):
+    bot.send_message(message.chat.id, status_text(), reply_markup=main_menu_kb())
 
 
-@dp.message_handler(commands=["status"])
-async def cmd_status(message: types.Message):
-    await message.answer(await status_text(), parse_mode="Markdown")
+@bot.message_handler(commands=["status"])
+def cmd_status(message):
+    bot.send_message(message.chat.id, status_text())
 
 
-@dp.message_handler(commands=["exec"])
-async def cmd_exec(message: types.Message):
+@bot.message_handler(commands=["exec"])
+def cmd_exec(message):
     if not is_admin(message.from_user.id if message.from_user else None):
-        await message.answer("Access denied")
+        bot.send_message(message.chat.id, "Access denied")
         return
 
-    command = (message.get_args() or "").strip()
+    command = message.text.replace("/exec", "", 1).strip()
     if not command:
-        await message.answer("Usage: /exec <shell_command>")
+        bot.send_message(message.chat.id, "Usage: /exec <shell_command>")
         return
 
-    code, out, err = await run_shell(command, root=True, timeout=60)
+    code, out, err = run_shell(command, root=True, timeout=60)
     payload = out if out else err
     if not payload:
         payload = "(no output)"
     if len(payload) > 3500:
         payload = payload[:3500] + "..."
-    await message.answer(f"Exit: {code}\n\n```\n{payload}\n```", parse_mode="Markdown")
+    bot.send_message(message.chat.id, f"Exit: {code}\n\n```\n{payload}\n```")
 
 
-@dp.message_handler(commands=["update"])
-async def cmd_update(message: types.Message):
+@bot.message_handler(commands=["update"])
+def cmd_update(message):
     if not is_admin(message.from_user.id if message.from_user else None):
         return
-    await message.answer("🔄 Проверяю обновления на GitHub...")
-    await perform_update(message)
+    bot.send_message(message.chat.id, "🔄 Проверяю обновления на GitHub...")
+    perform_update(message.chat.id)
 
 
-@dp.message_handler(commands=["add_server"])
-async def cmd_add_server(message: types.Message):
+@bot.message_handler(commands=["add_server"])
+def cmd_add_server(message):
     if not is_admin(message.from_user.id if message.from_user else None):
-        await message.answer("Access denied")
+        bot.send_message(message.chat.id, "Access denied")
         return
     waiting_server_from_user.add(message.from_user.id)
-    await message.answer("Send in one line: <name>|<private_server_link>")
+    bot.send_message(message.chat.id, "Send in one line: <name>|<private_server_link>")
 
 
-@dp.message_handler(commands=["add_cookie"])
-async def cmd_add_cookie(message: types.Message):
+@bot.message_handler(commands=["add_cookie"])
+def cmd_add_cookie(message):
     if not is_admin(message.from_user.id if message.from_user else None):
-        await message.answer("Access denied")
+        bot.send_message(message.chat.id, "Access denied")
         return
     waiting_cookie_from_user.add(message.from_user.id)
-    await message.answer("Send in one line: <nickname>|<ROBLOSECURITY_cookie>")
+    bot.send_message(message.chat.id, "Send in one line: <nickname>|<ROBLOSECURITY_cookie>")
 
 
-@dp.message_handler(content_types=types.ContentType.TEXT)
-async def handle_plain_input(message: types.Message):
+@bot.callback_query_handler(func=lambda c: c.data == "menu:main")
+def cb_main_menu(call):
+    bot.edit_message_text(
+        status_text(),
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=main_menu_kb(),
+    )
+    bot.answer_callback_query(call.id)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "menu:status")
+def cb_status(call):
+    bot.edit_message_text(
+        status_text(),
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=main_menu_kb(),
+    )
+    bot.answer_callback_query(call.id, "Status refreshed")
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "menu:servers")
+def cb_servers(call):
+    servers = run_async(db.list_servers())
+    active_name = run_async(db.get_setting("active_server_name", default=""))
+    text = "🖥 Server Manager\n\nUse /add_server to add new."
+    bot.edit_message_text(
+        text,
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=servers_menu_kb(servers, active_name or None),
+    )
+    bot.answer_callback_query(call.id)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "menu:cookies")
+def cb_cookies(call):
+    cookies = run_async(db.list_cookies())
+    active_name = run_async(db.get_setting("active_cookie_name", default=""))
+    text = "🍪 Cookie Manager\n\nUse /add_cookie to add or replace."
+    bot.edit_message_text(
+        text,
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=cookies_menu_kb(cookies, active_name or None),
+    )
+    bot.answer_callback_query(call.id)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "sys:update")
+def cb_update(call):
+    if not is_admin(call.from_user.id if call.from_user else None):
+        bot.answer_callback_query(call.id, "Access denied")
+        return
+    bot.answer_callback_query(call.id, "Running update...")
+    perform_update(call.message.chat.id)
+
+
+@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("srv:select:"))
+def cb_srv_select(call):
+    name = call.data.split(":", 2)[2]
+    rec = run_async(db.get_server(name))
+    if not rec:
+        bot.answer_callback_query(call.id, "Server not found")
+        return
+    run_async(db.set_setting("active_server_name", rec.name))
+    run_async(db.set_setting("active_server_link", rec.link))
+    bot.answer_callback_query(call.id, f"Selected: {rec.name}")
+    cb_servers(call)
+
+
+@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("srv:del:"))
+def cb_srv_del(call):
+    name = call.data.split(":", 2)[2]
+    ok = run_async(db.delete_server(name))
+    bot.answer_callback_query(call.id, "Deleted" if ok else "Not found")
+    cb_servers(call)
+
+
+@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("ck:select:"))
+def cb_ck_select(call):
+    nickname = call.data.split(":", 2)[2]
+    rec = run_async(db.get_cookie(nickname))
+    if not rec:
+        bot.answer_callback_query(call.id, "Cookie not found")
+        return
+
+    run_async(db.set_setting("active_cookie_name", rec.nickname))
+    result = run_async(injector.inject_cookie(rec.cookie))
+    if result.success:
+        bot.answer_callback_query(call.id, "Cookie injected")
+    else:
+        bot.answer_callback_query(call.id, "Injection failed")
+        bot.send_message(call.message.chat.id, f"Injection error: {result.message}")
+
+    cb_cookies(call)
+
+
+@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("ck:del:"))
+def cb_ck_del(call):
+    nickname = call.data.split(":", 2)[2]
+    ok = run_async(db.delete_cookie(nickname))
+    bot.answer_callback_query(call.id, "Deleted" if ok else "Not found")
+    cb_cookies(call)
+
+
+@bot.message_handler(func=lambda message: True, content_types=["text"])
+def handle_plain_input(message):
     if not message.from_user or not is_admin(message.from_user.id):
         return
 
@@ -283,126 +397,42 @@ async def handle_plain_input(message: types.Message):
     if uid in waiting_server_from_user:
         waiting_server_from_user.discard(uid)
         if "|" not in text:
-            await message.answer("Invalid format. Use: <name>|<private_server_link>")
+            bot.send_message(message.chat.id, "Invalid format. Use: <name>|<private_server_link>")
             return
         name, link = [p.strip() for p in text.split("|", 1)]
         if not name or not link:
-            await message.answer("Name and link cannot be empty")
+            bot.send_message(message.chat.id, "Name and link cannot be empty")
             return
-        await db.add_or_replace_server(name, link)
-        await message.answer(f"Server saved: {name}")
+        run_async(db.add_or_replace_server(name, link))
+        bot.send_message(message.chat.id, f"Server saved: {name}")
         return
 
     if uid in waiting_cookie_from_user:
         waiting_cookie_from_user.discard(uid)
         if "|" not in text:
-            await message.answer("Invalid format. Use: <nickname>|<ROBLOSECURITY_cookie>")
+            bot.send_message(message.chat.id, "Invalid format. Use: <nickname>|<ROBLOSECURITY_cookie>")
             return
         nickname, cookie = [p.strip() for p in text.split("|", 1)]
         if not nickname or not cookie:
-            await message.answer("Nickname and cookie cannot be empty")
+            bot.send_message(message.chat.id, "Nickname and cookie cannot be empty")
             return
-        await db.add_or_replace_cookie(nickname, cookie)
-        await message.answer(f"Cookie saved: {nickname}")
+        run_async(db.add_or_replace_cookie(nickname, cookie))
+        bot.send_message(message.chat.id, f"Cookie saved: {nickname}")
 
 
-@dp.callback_query_handler(lambda c: c.data == "menu:main")
-async def cb_main_menu(call: types.CallbackQuery):
-    await call.message.edit_text(await status_text(), reply_markup=main_menu_kb(), parse_mode="Markdown")
-    await call.answer()
+def monitor_worker() -> None:
+    async def runner():
+        await db.initialize()
+        asyncio.create_task(monitor.ram_guard_loop(interval_sec=10))
+        asyncio.create_task(monitor.watchdog_loop(interval_sec=15))
+        while True:
+            await asyncio.sleep(3600)
 
-
-@dp.callback_query_handler(lambda c: c.data == "menu:status")
-async def cb_status(call: types.CallbackQuery):
-    await call.message.edit_text(await status_text(), reply_markup=main_menu_kb(), parse_mode="Markdown")
-    await call.answer("Status refreshed")
-
-
-@dp.callback_query_handler(lambda c: c.data == "menu:servers")
-async def cb_servers(call: types.CallbackQuery):
-    servers = await db.list_servers()
-    active_name = await db.get_setting("active_server_name", default="")
-    text = "🖥 Server Manager\n\nUse /add_server to add new."
-    await call.message.edit_text(text, reply_markup=servers_menu_kb(servers, active_name or None))
-    await call.answer()
-
-
-@dp.callback_query_handler(lambda c: c.data == "menu:cookies")
-async def cb_cookies(call: types.CallbackQuery):
-    cookies = await db.list_cookies()
-    active_name = await db.get_setting("active_cookie_name", default="")
-    text = "🍪 Cookie Manager\n\nUse /add_cookie to add or replace."
-    await call.message.edit_text(text, reply_markup=cookies_menu_kb(cookies, active_name or None))
-    await call.answer()
-
-
-@dp.callback_query_handler(lambda c: c.data == "sys:update")
-async def cb_update(call: types.CallbackQuery):
-    if not is_admin(call.from_user.id if call.from_user else None):
-        await call.answer("Access denied", show_alert=True)
-        return
-    await call.answer("Running update...")
-    await perform_update(call.message)
-
-
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith("srv:select:"))
-async def cb_srv_select(call: types.CallbackQuery):
-    name = call.data.split(":", 2)[2]
-    rec = await db.get_server(name)
-    if not rec:
-        await call.answer("Server not found", show_alert=True)
-        return
-    await db.set_setting("active_server_name", rec.name)
-    await db.set_setting("active_server_link", rec.link)
-    await call.answer(f"Selected: {rec.name}")
-    await cb_servers(call)
-
-
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith("srv:del:"))
-async def cb_srv_del(call: types.CallbackQuery):
-    name = call.data.split(":", 2)[2]
-    ok = await db.delete_server(name)
-    await call.answer("Deleted" if ok else "Not found")
-    await cb_servers(call)
-
-
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith("ck:select:"))
-async def cb_ck_select(call: types.CallbackQuery):
-    nickname = call.data.split(":", 2)[2]
-    rec = await db.get_cookie(nickname)
-    if not rec:
-        await call.answer("Cookie not found", show_alert=True)
-        return
-
-    await db.set_setting("active_cookie_name", rec.nickname)
-    result = await injector.inject_cookie(rec.cookie)
-    if result.success:
-        await call.answer("Cookie injected")
-    else:
-        await call.answer("Injection failed", show_alert=True)
-        await call.message.answer(f"Injection error: {result.message}")
-
-    await cb_cookies(call)
-
-
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith("ck:del:"))
-async def cb_ck_del(call: types.CallbackQuery):
-    nickname = call.data.split(":", 2)[2]
-    ok = await db.delete_cookie(nickname)
-    await call.answer("Deleted" if ok else "Not found")
-    await cb_cookies(call)
-
-
-async def on_startup(_):
-    await db.initialize()
-    asyncio.create_task(monitor.ram_guard_loop(interval_sec=10))
-    asyncio.create_task(monitor.watchdog_loop(interval_sec=15))
-    logger.info("Aegis V13 started")
+    asyncio.run(runner())
 
 
 def main() -> None:
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(monitor.set_process_priority(os.getpid()))
+    run_async(monitor.set_process_priority(os.getpid()))
 
     logger.add(
         "watchdog.log",
@@ -413,7 +443,17 @@ def main() -> None:
         diagnose=False,
     )
 
-    executor.start_polling(dp, on_startup=on_startup, skip_updates=True)
+    t = threading.Thread(target=monitor_worker, daemon=True)
+    t.start()
+
+    logger.info("Aegis V13 started (pyTelegramBotAPI mode)")
+
+    while True:
+        try:
+            bot.infinity_polling(timeout=60, long_polling_timeout=40)
+        except Exception as exc:
+            logger.exception(f"Polling crashed: {exc}")
+            time.sleep(3)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,4 @@
-aiogram==2.23.1
+pyTelegramBotAPI==4.23.0
 loguru==0.7.2
 psutil==6.0.0
 requests==2.32.3
-aiohttp==3.8.6
