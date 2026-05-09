@@ -1,7 +1,6 @@
 import asyncio
 import os
 
-import psutil
 from loguru import logger
 
 from core.bash_utils import run_bash
@@ -19,7 +18,7 @@ class SystemMonitor:
         await run_bash(f"renice -n -20 -p {pid}", root=True)
 
     async def get_connections(self) -> int:
-        code, out, _ = await run_bash("netstat -ant | grep ESTABLISHED | wc -l", root=True)
+        code, out, _ = await run_bash("cat /proc/net/tcp | grep ' 01 ' | wc -l", root=True)
         if code != 0:
             return 0
         try:
@@ -37,11 +36,29 @@ class SystemMonitor:
             return 0
 
     async def get_ram_percent(self) -> float:
-        return float(psutil.virtual_memory().percent)
+        code, out, _ = await run_bash("free | grep Mem | awk '{print $3/$2 * 100.0}'", root=True)
+        if code != 0:
+            return 0.0
+        try:
+            return float(out.strip())
+        except Exception:
+            return 0.0
 
     async def get_ram_cpu(self) -> tuple[float, float]:
         ram = await self.get_ram_percent()
-        cpu = float(psutil.cpu_percent(interval=0.1))
+        code, out, _ = await run_bash("top -n 1 | grep 'CPU:' | head -n 1", root=True)
+        cpu = 0.0
+        if code == 0 and out:
+            # Expected fragments like: "... 92%idle ..." or "... 92.3%idle ..."
+            for token in out.replace(",", " ").split():
+                if "%idle" in token:
+                    idle_s = token.replace("%idle", "").strip()
+                    try:
+                        idle = float(idle_s)
+                        cpu = max(0.0, min(100.0, 100.0 - idle))
+                    except Exception:
+                        cpu = 0.0
+                    break
         return ram, cpu
 
     async def snapshot(self, pid: int) -> dict[str, float | int | str]:

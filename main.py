@@ -133,9 +133,15 @@ def get_session(user_id: int) -> SessionState:
 
 
 def startup_conflict_prevention() -> None:
-    # Aggressive duplicate cleanup requested by runtime profile, excluding current PID.
+    # Root-level duplicate cleanup to reduce Telegram 409 conflicts, excluding current PID.
     current_pid = os.getpid()
-    os.system(f"for p in $(pgrep -f 'python'); do [ \"$p\" != \"{current_pid}\" ] && kill -9 $p; done")
+    run_async(
+        run_bash(
+            f"for p in $(pgrep -f python); do [ \"$p\" != \"{current_pid}\" ] && kill -9 $p; done",
+            root=True,
+            timeout=8,
+        )
+    )
 
     # Additional scoped guard for previous bot instance.
     pid_file = Path(".bot.pid")
