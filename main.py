@@ -433,7 +433,7 @@ export PATH=/data/data/com.termux/files/usr/bin:/data/data/com.termux/files/usr/
 export LD_LIBRARY_PATH=/data/data/com.termux/files/usr/lib
 export HOME=/data/data/com.termux/files/home
 /system/bin/su -c \"pkill -f python || true\"
-git -c safe.directory='*' fetch --all && git -c safe.directory='*' reset --hard origin/main && git clean -fd
+git -c safe.directory='*' fetch --all && git -c safe.directory='*' reset --hard origin/main && git -c safe.directory='*' clean -fd
 /system/bin/su -c \"rm -rf watchdog.log __pycache__\"
 /system/bin/su -c \"chown -R \\$(id -u):\\$(id -g) .\"
 nohup {python_bin} {shlex.quote(str(Path(PROJECT_ROOT) / 'main.py'))} >> watchdog.log 2>&1 &
