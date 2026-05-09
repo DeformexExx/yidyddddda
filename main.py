@@ -51,6 +51,7 @@ class SessionState:
     selected_device: str
     view: str = "main"
     message_id: int | None = None
+    wait_mode: str | None = None  # None | WAIT_COOKIE | WAIT_SERVER
 
 
 def load_config(path: Path = CONFIG_PATH) -> AppConfig:
@@ -159,6 +160,87 @@ def startup_conflict_prevention() -> None:
 
 def run_shell(command: str, root: bool = False, timeout: int = 120) -> tuple[int, str, str]:
     return run_async(run_bash(command, root=root, timeout=timeout))
+
+
+def device_package(device_name: str) -> str:
+    return f"com.roblox.{device_name}"
+
+
+def clean_cookie_input(raw: str) -> str:
+    s = (raw or "").strip()
+    warning_prefix = "WARNING: DO NOT SHARE THIS"
+    if warning_prefix in s:
+        idx = s.find("_|WARNING")
+        if idx != -1:
+            s = s[idx:]
+        else:
+            s = s.replace(warning_prefix, "").strip()
+    return s
+
+
+def hard_reset_clone(device_name: str) -> tuple[int, str, str]:
+    pkg = device_package(device_name)
+    cmd = f"am force-stop {shlex.quote(pkg)} && monkey -p {shlex.quote(pkg)} -c android.intent.category.LAUNCHER 1"
+    return run_shell(cmd, root=True, timeout=20)
+
+
+def ensure_sqlite3() -> tuple[bool, str]:
+    code, out, err = run_shell("command -v sqlite3", root=False, timeout=10)
+    if code == 0 and out.strip():
+        return True, "sqlite3 found"
+
+    code, out, err = run_shell("pkg install -y sqlite", root=False, timeout=180)
+    if code == 0:
+        return True, "sqlite installed"
+    return False, (err or out or "sqlite install failed")
+
+
+def inject_cookie_for_device(device_name: str, cookie_value: str) -> tuple[bool, str]:
+    ok, info = ensure_sqlite3()
+    if not ok:
+        return False, f"sqlite3 unavailable: {info}"
+
+    clean_cookie = clean_cookie_input(cookie_value)
+    if not clean_cookie:
+        return False, "Cookie is empty"
+
+    pkg = device_package(device_name)
+    db_path = f"/data/data/{pkg}/app_webview/Default/Cookies"
+    esc_cookie = clean_cookie.replace("'", "''")
+    delete_sql = "DELETE FROM cookies WHERE host_key='.roblox.com' AND name='.ROBLOSECURITY';"
+    insert_sql = (
+        "INSERT INTO cookies "
+        "(creation_utc, host_key, top_frame_site_key, name, value, encrypted_value, path, "
+        "expires_utc, is_secure, is_httponly, last_access_utc, has_expires, is_persistent, "
+        "priority, samesite, source_scheme, source_port, is_same_party) "
+        "VALUES "
+        f"(strftime('%s','now')*1000000, '.roblox.com', '', '.ROBLOSECURITY', '{esc_cookie}', X'', '/', "
+        "253402300799000000, 1, 1, strftime('%s','now')*1000000, 1, 1, 1, 0, 2, 443, 0);"
+    )
+
+    cmd = (
+        f"test -f {shlex.quote(db_path)} && "
+        f"sqlite3 {shlex.quote(db_path)} \"{delete_sql}\" && "
+        f"sqlite3 {shlex.quote(db_path)} \"{insert_sql}\""
+    )
+    code, out, err = run_shell(cmd, root=True, timeout=45)
+    if code != 0:
+        return False, (err or out or "sqlite injection failed")
+
+    hard_reset_clone(device_name)
+    return True, "Cookie injected and clone restarted"
+
+
+def inject_server_for_device(device_name: str, link: str) -> tuple[bool, str]:
+    clean_link = (link or "").strip()
+    if not clean_link:
+        return False, "Link is empty"
+    pkg = device_package(device_name)
+    cmd = f"am start -a android.intent.action.VIEW -d {shlex.quote(clean_link)} {shlex.quote(pkg)}"
+    code, out, err = run_shell(cmd, root=True, timeout=20)
+    if code != 0:
+        return False, (err or out or "server open failed")
+    return True, "Server link sent to clone"
 
 
 def render_main(user_id: int) -> tuple[str, object]:
@@ -283,6 +365,30 @@ def cmd_update(message):
     perform_update(message.chat.id)
 
 
+@bot.message_handler(func=lambda m: bool(m.text) and not m.text.startswith("/"))
+def handle_wait_input(message):
+    if not is_admin(message.from_user.id if message.from_user else None):
+        return
+
+    state = get_session(message.from_user.id)
+    mode = state.wait_mode
+    if mode not in ("WAIT_COOKIE", "WAIT_SERVER"):
+        return
+
+    dev = state.selected_device
+    payload = message.text.strip()
+
+    if mode == "WAIT_COOKIE":
+        ok, msg = inject_cookie_for_device(dev, payload)
+        state.wait_mode = None
+        safe_send(message.chat.id, html.escape(f"✅ [{dev}] {msg}" if ok else f"❌ [{dev}] {msg}"))
+        return
+
+    ok, msg = inject_server_for_device(dev, payload)
+    state.wait_mode = None
+    safe_send(message.chat.id, html.escape(f"✅ [{dev}] {msg}" if ok else f"❌ [{dev}] {msg}"))
+
+
 @bot.callback_query_handler(func=lambda c: c.data == "menu:main")
 def cb_main(call):
     if not is_admin(call.from_user.id if call.from_user else None):
@@ -325,7 +431,7 @@ def cb_set_update(call):
     perform_update(call.message.chat.id)
 
 
-@bot.callback_query_handler(func=lambda c: c.data == "set:silent:toggle")
+@bot.callback_query_handler(func=lambda c: c.data in ("set:silent:toggle", "set:silent"))
 def cb_set_silent(call):
     global silent_mode
     silent_mode = not silent_mode
@@ -360,9 +466,15 @@ def cb_actions(call):
         devices[dev].output_on = False
         bot.answer_callback_query(call.id, f"{dev} stopped")
     elif action == "cookie":
-        bot.answer_callback_query(call.id, "Cookie slot ready")
+        state = get_session(call.from_user.id)
+        state.wait_mode = "WAIT_COOKIE"
+        safe_send(call.message.chat.id, html.escape("Ready for input. Send Cookie now."))
+        bot.answer_callback_query(call.id, "WAIT_COOKIE")
     elif action == "server":
-        bot.answer_callback_query(call.id, "Server slot ready")
+        state = get_session(call.from_user.id)
+        state.wait_mode = "WAIT_SERVER"
+        safe_send(call.message.chat.id, html.escape("Ready for input. Send Link now."))
+        bot.answer_callback_query(call.id, "WAIT_SERVER")
 
 
 def monitor_worker() -> None:
