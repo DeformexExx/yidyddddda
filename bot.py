@@ -1,5 +1,4 @@
 import os
-os.system("pkill -f python")
 
 import asyncio
 import html
@@ -184,11 +183,38 @@ def exec_cmd(message):
     safe_send(message.chat.id, f"<pre>[{html.escape(dev.name)}|PID:{dev.pid}] Exit: {code}\n{payload}</pre>")
 
 
+def nuclear_update() -> tuple[int, str, str]:
+    project_dir = "/data/data/com.termux/files/home/aegis_watchdog"
+    current_pid = os.getpid()
+    shell(
+        f"for p in $(pgrep -f python); do [ \"$p\" != \"{current_pid}\" ] && kill -9 $p; done; "
+        "pkill -9 -f com.roblox.client || true; /system/bin/am force-stop com.roblox.client || true",
+        root=True,
+        timeout=30,
+    )
+    shell(
+        "rm -f watchdog.log; "
+        "find . -type d -name __pycache__ -prune -exec rm -rf {} +; "
+        "find . -type f -name '*.tmp' -delete",
+        root=True,
+        timeout=30,
+    )
+    shell(f"chown -R $(id -u):$(id -g) {shlex.quote(project_dir)}", root=True, timeout=120)
+    shell("chmod -R 755 .", root=True, timeout=120)
+    code, out, err = shell("git fetch --all && git reset --hard origin/main && git clean -fd", root=False, timeout=240)
+    shell(f"chown -R $(id -u):$(id -g) {shlex.quote(project_dir)}", root=True, timeout=120)
+    shell("chmod -R 755 .", root=True, timeout=120)
+    return code, out, err
+
+
 @bot.message_handler(commands=["update"])
 def update_cmd(message):
     if not is_admin(message.from_user.id if message.from_user else None):
         return
-    shell("git pull", root=False, timeout=120)
+    code, out, err = nuclear_update()
+    if code != 0:
+        safe_send(message.chat.id, f"<pre>Update failed\n{html.escape(err or out)}</pre>")
+        return
     safe_send(message.chat.id, html.escape("System updated, restarting..."))
     os.execv(sys.executable, ["python"] + sys.argv)
 
@@ -233,8 +259,8 @@ def toggle_silent(call):
 
 @bot.callback_query_handler(func=lambda c: c.data == "set:update")
 def update_btn(call):
-    shell("git pull", root=False, timeout=120)
-    bot.answer_callback_query(call.id, "Updated")
+    code, out, err = nuclear_update()
+    bot.answer_callback_query(call.id, "Updated" if code == 0 else "Update failed")
 
 
 @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("all:"))

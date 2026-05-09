@@ -350,6 +350,34 @@ def auto_refresh_worker() -> None:
 
 
 def perform_update(chat_id: int) -> None:
+    project_dir = "/data/data/com.termux/files/home/aegis_watchdog"
+    cwd = shlex.quote(str(Path.cwd()))
+    deploy_dir = shlex.quote(project_dir)
+
+    safe_send(chat_id, html.escape("☢️ Nuclear deploy started..."))
+
+    # Stop stale Android/Python workers first. Keep the current bot alive until the reset is complete.
+    current_pid = os.getpid()
+    run_shell(
+        f"for p in $(pgrep -f python); do [ \"$p\" != \"{current_pid}\" ] && kill -9 $p; done; "
+        "pkill -9 -f com.roblox.client || true; /system/bin/am force-stop com.roblox.client || true",
+        root=True,
+        timeout=30,
+    )
+
+    # Full sanitize: remove root-owned stale artifacts before git touches the tree.
+    run_shell(
+        "rm -f watchdog.log; "
+        "find . -type d -name __pycache__ -prune -exec rm -rf {} +; "
+        "find . -type f -name '*.tmp' -delete",
+        root=True,
+        timeout=30,
+    )
+
+    # Correct ownership before git runs as Termux user.
+    run_shell(f"chown -R $(id -u):$(id -g) {deploy_dir}", root=True, timeout=120)
+    run_shell("chmod -R 755 .", root=True, timeout=120)
+
     code, out, err = run_shell("git rev-parse --is-inside-work-tree", root=False, timeout=15)
     if code != 0 or "true" not in out.lower():
         safe_send(chat_id, html.escape("❌ Not a git repository"))
@@ -358,16 +386,15 @@ def perform_update(chat_id: int) -> None:
     if config.git_repo_url:
         run_shell(f"git remote set-url origin {shlex.quote(config.git_repo_url)}", root=False, timeout=20)
 
-    code, out, err = run_shell("git pull", root=False, timeout=120)
+    code, out, err = run_shell("git fetch --all && git reset --hard origin/main && git clean -fd", root=False, timeout=240)
     if code != 0:
         safe_send(chat_id, f"<pre>❌ Update failed\n{html.escape(err or out)}</pre>")
         return
 
-    if "Already up to date" in out or "Already up-to-date" in out:
-        safe_send(chat_id, html.escape("✅ Already up to date"))
-        return
+    run_shell(f"chown -R $(id -u):$(id -g) {deploy_dir}", root=True, timeout=120)
+    run_shell("chmod -R 755 .", root=True, timeout=120)
 
-    safe_send(chat_id, html.escape("📥 System updated, restarting..."))
+    safe_send(chat_id, html.escape("📥 Nuclear deploy complete, restarting..."))
     os.execv(sys.executable, ["python"] + sys.argv)
 
 
