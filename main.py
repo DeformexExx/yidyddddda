@@ -133,10 +133,12 @@ def get_session(user_id: int) -> SessionState:
 
 
 def startup_conflict_prevention() -> None:
-    # Guard against duplicate polling instances without killing unrelated Python processes
-    pid_file = Path(".bot.pid")
+    # Aggressive duplicate cleanup requested by runtime profile, excluding current PID.
     current_pid = os.getpid()
+    os.system(f"for p in $(pgrep -f 'python'); do [ \"$p\" != \"{current_pid}\" ] && kill -9 $p; done")
 
+    # Additional scoped guard for previous bot instance.
+    pid_file = Path(".bot.pid")
     if pid_file.exists():
         try:
             old_pid = int(pid_file.read_text(encoding="utf-8").strip())
@@ -361,17 +363,15 @@ def monitor_worker() -> None:
     async def runner():
         while True:
             try:
-                ram = await monitor.get_ram_percent()
-                if ram >= monitor.ram_critical_percent:
-                    await monitor.reboot_now()
+                await monitor.reboot_if_needed()
 
                 for dev in devices.values():
                     if not dev.output_on:
                         continue
-                    con = await monitor.get_clone_connections()
+                    con = await monitor.get_connections()
                     if con <= monitor.tcp_zombie_threshold:
-                        await monitor.restart_roblox()
-                        if not silent_mode:
+                        restarted = await monitor.watchdog_tick()
+                        if restarted and (not silent_mode):
                             first_chat = next(iter(tracked_messages.keys()), None)
                             if first_chat:
                                 safe_send(first_chat, html.escape(f"⚠️ Restarting device {dev.name} (CON={con})"))

@@ -28,18 +28,21 @@ class SystemMonitor:
             return 0
 
     async def get_threads(self, pid: int) -> int:
-        code, out, _ = await run_bash(f"cat /proc/{pid}/status | grep Threads", root=True)
+        code, out, _ = await run_bash(f"cat /proc/{pid}/status | grep Threads | awk '{{print $2}}'", root=True)
         if code != 0:
             return 0
         try:
-            return int(out.split(":", 1)[1].strip())
+            return int(out.strip())
         except Exception:
             return 0
 
+    async def get_ram_percent(self) -> float:
+        return float(psutil.virtual_memory().percent)
+
     async def get_ram_cpu(self) -> tuple[float, float]:
-        ram = psutil.virtual_memory().percent
-        cpu = psutil.cpu_percent(interval=0.1)
-        return float(ram), float(cpu)
+        ram = await self.get_ram_percent()
+        cpu = float(psutil.cpu_percent(interval=0.1))
+        return ram, cpu
 
     async def snapshot(self, pid: int) -> dict[str, float | int | str]:
         ram, cpu = await self.get_ram_cpu()
