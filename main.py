@@ -3,6 +3,7 @@ import html
 import json
 import os
 import shlex
+import subprocess
 import sys
 import threading
 import time
@@ -349,53 +350,52 @@ def auto_refresh_worker() -> None:
             time.sleep(10)
 
 
-def perform_update(chat_id: int) -> None:
-    project_dir = "/data/data/com.termux/files/home/aegis_watchdog"
-    cwd = shlex.quote(str(Path.cwd()))
-    deploy_dir = shlex.quote(project_dir)
-
-    safe_send(chat_id, html.escape("☢️ Nuclear deploy started..."))
-
-    # Stop stale Android/Python workers first. Keep the current bot alive until the reset is complete.
+def spawn_detached_update() -> Path:
+    project_dir = Path.cwd()
+    script_path = project_dir / ".aegis_detached_update.sh"
     current_pid = os.getpid()
-    run_shell(
-        f"for p in $(pgrep -f python); do [ \"$p\" != \"{current_pid}\" ] && kill -9 $p; done; "
-        "pkill -9 -f com.roblox.client || true; /system/bin/am force-stop com.roblox.client || true",
-        root=True,
-        timeout=30,
-    )
-
-    # Full sanitize: remove root-owned stale artifacts before git touches the tree.
-    run_shell(
-        "rm -f watchdog.log; "
-        "find . -type d -name __pycache__ -prune -exec rm -rf {} +; "
-        "find . -type f -name '*.tmp' -delete",
-        root=True,
-        timeout=30,
-    )
-
-    # Correct ownership before git runs as Termux user.
-    run_shell(f"chown -R $(id -u):$(id -g) {deploy_dir}", root=True, timeout=120)
-    run_shell("chmod -R 755 .", root=True, timeout=120)
-
-    code, out, err = run_shell("git rev-parse --is-inside-work-tree", root=False, timeout=15)
-    if code != 0 or "true" not in out.lower():
-        safe_send(chat_id, html.escape("❌ Not a git repository"))
-        return
-
+    python_bin = sys.executable
+    main_script = Path(sys.argv[0]).name or "main.py"
+    repo_url_line = ""
     if config.git_repo_url:
-        run_shell(f"git remote set-url origin {shlex.quote(config.git_repo_url)}", root=False, timeout=20)
+        repo_url_line = f"git remote set-url origin {shlex.quote(config.git_repo_url)} || true"
 
-    code, out, err = run_shell("git fetch --all && git reset --hard origin/main && git clean -fd", root=False, timeout=240)
-    if code != 0:
-        safe_send(chat_id, f"<pre>❌ Update failed\n{html.escape(err or out)}</pre>")
-        return
+    script = f"""#!/data/data/com.termux/files/usr/bin/bash
+set +e
+cd {shlex.quote(str(project_dir))} || exit 1
+export PATH=/data/data/com.termux/files/usr/bin:/data/data/com.termux/files/usr/bin/applets:/system/bin:/system/xbin
+export LD_LIBRARY_PATH=/data/data/com.termux/files/usr/lib
+export HOME=/data/data/com.termux/files/home
+/system/bin/su -c \"for p in \\$(pgrep -f python); do [ \\\"\\$p\\\" != \\\"{current_pid}\\\" ] && kill -9 \\"\\$p\\"; done; pkill -9 -f com.roblox.client || true; /system/bin/am force-stop com.roblox.client || true\"
+sleep 1
+/system/bin/su -c \"rm -f watchdog.log; find . -type d -name __pycache__ -prune -exec rm -rf {{}} +; find . -type f -name '*.tmp' -delete\"
+/system/bin/su -c \"chown -R \\$(id -u):\\$(id -g) {shlex.quote(str(project_dir))}\"
+/system/bin/su -c \"chmod -R 755 .\"
+{repo_url_line}
+git fetch --all
+git reset --hard origin/main
+git clean -fd
+/system/bin/su -c \"chown -R \\$(id -u):\\$(id -g) {shlex.quote(str(project_dir))}\"
+/system/bin/su -c \"chmod -R 755 .\"
+/system/bin/su -c \"for p in \\$(pgrep -f python); do kill -9 \\"\\$p\\"; done\" || true
+nohup {shlex.quote(python_bin)} {shlex.quote(main_script)} >> watchdog.log 2>&1 &
+"""
+    script_path.write_text(script, encoding="utf-8")
+    os.chmod(script_path, 0o755)
+    return script_path
 
-    run_shell(f"chown -R $(id -u):$(id -g) {deploy_dir}", root=True, timeout=120)
-    run_shell("chmod -R 755 .", root=True, timeout=120)
 
-    safe_send(chat_id, html.escape("📥 Nuclear deploy complete, restarting..."))
-    os.execv(sys.executable, ["python"] + sys.argv)
+def perform_update(chat_id: int) -> None:
+    script_path = spawn_detached_update()
+    safe_send(chat_id, html.escape("☢️ Detached nuclear deploy spawned; bot process exiting for restart..."))
+    subprocess.Popen(
+        ["/data/data/com.termux/files/usr/bin/bash", str(script_path)],
+        cwd=str(Path.cwd()),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    os._exit(0)
 
 
 @bot.message_handler(commands=["start", "menu"])
