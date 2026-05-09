@@ -62,20 +62,26 @@ class SystemMonitor:
 
     async def get_ram_cpu(self) -> tuple[float, float]:
         ram = await self.get_ram_percent()
-        code, out, err = await run_bash("top -n 1 -b", root=True)
+        code, out, err = await run_bash("top -n 1 -b | grep com.roblox.client", root=True)
         if code != 0:
             logger.warning(f"get_ram_cpu top failed: {err or out}")
             return ram, 0.0
 
         cpu = 0.0
         try:
-            m = re.search(r"([0-9]+(?:\.[0-9]+)?)%\s*idle", out)
-            if m:
-                idle = float(m.group(1))
-                # Android may show multi-core aggregate (e.g., 800%idle)
-                if idle > 100.0:
-                    idle = 100.0
-                cpu = max(0.0, min(100.0, 100.0 - idle))
+            # Accept either an explicit percent column (e.g. 12.3%) or Android top numeric CPU column.
+            percent_match = re.search(r"([0-9]+(?:\.[0-9]+)?)%", out)
+            if percent_match:
+                cpu = float(percent_match.group(1))
+            else:
+                parts = out.split()
+                for token in parts:
+                    if re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", token):
+                        value = float(token)
+                        if 0.0 <= value <= 100.0:
+                            cpu = value
+                            break
+            cpu = max(0.0, min(100.0, cpu))
         except Exception as exc:
             logger.warning(f"get_ram_cpu parse failed: {exc}")
             cpu = 0.0

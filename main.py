@@ -229,14 +229,14 @@ def inject_cookie_for_device(device_name: str, cookie_value: str) -> tuple[bool,
     pkg = device_package(device_name)
     db_path = f"/data/data/{pkg}/app_webview/Default/Cookies"
     parent_dir = f"/data/data/{pkg}/app_webview/Default"
-    temp_db = "/data/data/com.termux/files/home/temp_db"
+    temp_db = "/data/data/com.termux/files/home/temp_cookies"
 
     # MUST stop first to release lock.
     stop_code, stop_out, stop_err = run_shell(f"am force-stop {target_process_name()}", root=True, timeout=20)
     logger.info(f"cookie_pre_stop [{device_name}] code={stop_code} out={stop_out} err={stop_err}")
 
     # Copy-edit-replace flow.
-    code, out, err = run_shell(f"cp {shlex.quote(db_path)} {shlex.quote(temp_db)}", root=True, timeout=20)
+    code, out, err = run_shell(f"cp {shlex.quote(db_path)} {shlex.quote(temp_db)} && chmod 777 {shlex.quote(temp_db)}", root=True, timeout=20)
     logger.info(f"cookie_copy [{device_name}] code={code} out={out} err={err}")
     if code != 0:
         return False, (err or out or "failed to copy cookies db")

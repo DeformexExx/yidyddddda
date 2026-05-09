@@ -9,14 +9,12 @@ TERMUX_BASH = f"{TERMUX_BIN}/bash"
 
 async def run_bash(command: str, root: bool = False, timeout: int = 20) -> tuple[int, str, str]:
     env = os.environ.copy()
-    env["PATH"] = f"{TERMUX_BIN}:{TERMUX_BIN}/applets:" + env.get("PATH", "")
-
-    # Keep LD_PRELOAD neutral unless already provided by host env.
-    if "LD_PRELOAD" not in env:
-        env["LD_PRELOAD"] = ""
+    env["PATH"] = "/data/data/com.termux/files/usr/bin:/data/data/com.termux/files/usr/bin/applets:/system/bin:/system/xbin"
+    env["LD_LIBRARY_PATH"] = "/data/data/com.termux/files/usr/lib"
 
     bash_wrapped = f"{shlex.quote(TERMUX_BASH)} -c {shlex.quote(command)}"
-    final_command = f"su -c {shlex.quote(bash_wrapped)}" if root else bash_wrapped
+    already_root = hasattr(os, "geteuid") and os.geteuid() == 0
+    final_command = bash_wrapped if (not root or already_root) else f"su -c {shlex.quote(bash_wrapped)}"
 
     proc = await asyncio.create_subprocess_shell(
         final_command,
