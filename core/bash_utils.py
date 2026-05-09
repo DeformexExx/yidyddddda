@@ -8,12 +8,12 @@ TERMUX_BASH = f"{TERMUX_BIN}/bash"
 
 
 async def run_bash(command: str, root: bool = False, timeout: int = 20) -> tuple[int, str, str]:
-    custom_env = os.environ.copy()
-    custom_env["PATH"] = f"{TERMUX_BIN}:{custom_env.get('PATH', '')}"
+    env = os.environ.copy()
+    env["PATH"] = f"{TERMUX_BIN}:{TERMUX_BIN}/applets:" + env.get("PATH", "")
 
     # Keep LD_PRELOAD neutral unless already provided by host env.
-    if "LD_PRELOAD" not in custom_env:
-        custom_env["LD_PRELOAD"] = ""
+    if "LD_PRELOAD" not in env:
+        env["LD_PRELOAD"] = ""
 
     bash_wrapped = f"{shlex.quote(TERMUX_BASH)} -c {shlex.quote(command)}"
     final_command = f"su -c {shlex.quote(bash_wrapped)}" if root else bash_wrapped
@@ -22,7 +22,7 @@ async def run_bash(command: str, root: bool = False, timeout: int = 20) -> tuple
         final_command,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        env=custom_env,
+        env=env,
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
