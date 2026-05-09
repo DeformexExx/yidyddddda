@@ -163,6 +163,10 @@ def run_shell(command: str, root: bool = False, timeout: int = 120) -> tuple[int
 
 
 def device_package(device_name: str) -> str:
+    # Support requested clone-style suffix mapping: com.roblox.clien{suffix}
+    suffix = device_name.replace("DEV_", "")
+    if suffix.isdigit():
+        return f"com.roblox.clien{suffix}"
     return f"com.roblox.{device_name}"
 
 
@@ -180,8 +184,16 @@ def clean_cookie_input(raw: str) -> str:
 
 def hard_reset_clone(device_name: str) -> tuple[int, str, str]:
     pkg = device_package(device_name)
-    cmd = f"am force-stop {shlex.quote(pkg)} && monkey -p {shlex.quote(pkg)} -c android.intent.category.LAUNCHER 1"
-    return run_shell(cmd, root=True, timeout=20)
+    code, out, err = run_shell(f"am force-stop {shlex.quote(pkg)}", root=True, timeout=20)
+    time.sleep(2)
+    code2, out2, err2 = run_shell(
+        f"monkey -p {shlex.quote(pkg)} -c android.intent.category.LAUNCHER 1",
+        root=True,
+        timeout=20,
+    )
+    if code2 != 0:
+        return code2, out2, err2
+    return code, out, err
 
 
 def ensure_sqlite3() -> tuple[bool, str]:
@@ -206,8 +218,13 @@ def inject_cookie_for_device(device_name: str, cookie_value: str) -> tuple[bool,
 
     pkg = device_package(device_name)
     db_path = f"/data/data/{pkg}/app_webview/Default/Cookies"
+
+    # Hard-reset first to release DB locks.
+    stop_code, stop_out, stop_err = run_shell(f"am force-stop {shlex.quote(pkg)}", root=True, timeout=20)
+    logger.info(f"cookie_pre_stop [{device_name}] code={stop_code} out={stop_out} err={stop_err}")
+
     esc_cookie = clean_cookie.replace("'", "''")
-    delete_sql = "DELETE FROM cookies WHERE host_key='.roblox.com' AND name='.ROBLOSECURITY';"
+    delete_sql = "DELETE FROM cookies;"
     insert_sql = (
         "INSERT INTO cookies "
         "(creation_utc, host_key, top_frame_site_key, name, value, encrypted_value, path, "
@@ -217,18 +234,26 @@ def inject_cookie_for_device(device_name: str, cookie_value: str) -> tuple[bool,
         f"(strftime('%s','now')*1000000, '.roblox.com', '', '.ROBLOSECURITY', '{esc_cookie}', X'', '/', "
         "253402300799000000, 1, 1, strftime('%s','now')*1000000, 1, 1, 1, 0, 2, 443, 0);"
     )
+    sql_blob = f"{delete_sql} {insert_sql}"
 
-    cmd = (
-        f"test -f {shlex.quote(db_path)} && "
-        f"sqlite3 {shlex.quote(db_path)} \"{delete_sql}\" && "
-        f"sqlite3 {shlex.quote(db_path)} \"{insert_sql}\""
-    )
-    code, out, err = run_shell(cmd, root=True, timeout=45)
+    # Entire sqlite execution is wrapped in su -c through run_shell(root=True).
+    cmd = f"test -f {shlex.quote(db_path)} && sqlite3 {shlex.quote(db_path)} \"{sql_blob}\""
+    code, out, err = run_shell(cmd, root=True, timeout=60)
+    logger.info(f"cookie_sqlite [{device_name}] code={code} out={out} err={err}")
     if code != 0:
         return False, (err or out or "sqlite injection failed")
 
-    hard_reset_clone(device_name)
-    return True, "Cookie injected and clone restarted"
+    time.sleep(2)
+    launch_code, launch_out, launch_err = run_shell(
+        f"monkey -p {shlex.quote(pkg)} -c android.intent.category.LAUNCHER 1",
+        root=True,
+        timeout=20,
+    )
+    logger.info(f"cookie_post_launch [{device_name}] code={launch_code} out={launch_out} err={launch_err}")
+    if launch_code != 0:
+        return False, (launch_err or launch_out or "clone launch failed")
+
+    return True, "Cookie injected and clone relaunched"
 
 
 def inject_server_for_device(device_name: str, link: str) -> tuple[bool, str]:

@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 
 from loguru import logger
 
@@ -36,29 +37,49 @@ class SystemMonitor:
             return 0
 
     async def get_ram_percent(self) -> float:
-        code, out, _ = await run_bash("free | grep Mem | awk '{print $3/$2 * 100.0}'", root=True)
+        code, out, err = await run_bash("cat /proc/meminfo", root=True)
         if code != 0:
+            logger.warning(f"get_ram_percent failed: {err or out}")
             return 0.0
+
         try:
-            return float(out.strip())
-        except Exception:
+            mem_total = 0.0
+            mem_available = 0.0
+            for line in out.splitlines():
+                if line.startswith("MemTotal:"):
+                    mem_total = float(line.split()[1])
+                elif line.startswith("MemAvailable:"):
+                    mem_available = float(line.split()[1])
+
+            if mem_total <= 0:
+                return 0.0
+
+            used_percent = ((mem_total - mem_available) / mem_total) * 100.0
+            return max(0.0, min(100.0, used_percent))
+        except Exception as exc:
+            logger.warning(f"get_ram_percent parse failed: {exc}")
             return 0.0
 
     async def get_ram_cpu(self) -> tuple[float, float]:
         ram = await self.get_ram_percent()
-        code, out, _ = await run_bash("top -n 1 | grep 'CPU:' | head -n 1", root=True)
+        code, out, err = await run_bash("top -n 1 -b", root=True)
+        if code != 0:
+            logger.warning(f"get_ram_cpu top failed: {err or out}")
+            return ram, 0.0
+
         cpu = 0.0
-        if code == 0 and out:
-            # Expected fragments like: "... 92%idle ..." or "... 92.3%idle ..."
-            for token in out.replace(",", " ").split():
-                if "%idle" in token:
-                    idle_s = token.replace("%idle", "").strip()
-                    try:
-                        idle = float(idle_s)
-                        cpu = max(0.0, min(100.0, 100.0 - idle))
-                    except Exception:
-                        cpu = 0.0
-                    break
+        try:
+            m = re.search(r"([0-9]+(?:\.[0-9]+)?)%\s*idle", out)
+            if m:
+                idle = float(m.group(1))
+                # Android may show multi-core aggregate (e.g., 800%idle)
+                if idle > 100.0:
+                    idle = 100.0
+                cpu = max(0.0, min(100.0, 100.0 - idle))
+        except Exception as exc:
+            logger.warning(f"get_ram_cpu parse failed: {exc}")
+            cpu = 0.0
+
         return ram, cpu
 
     async def snapshot(self, pid: int) -> dict[str, float | int | str]:
@@ -82,6 +103,12 @@ class SystemMonitor:
     async def watchdog_tick(self) -> bool:
         con = await self.get_connections()
         if con <= self.tcp_zombie_threshold:
-            await run_bash("am force-stop com.roblox.client && monkey -p com.roblox.client -c android.intent.category.LAUNCHER 1", root=True)
+            code, out, err = await run_bash(
+                "am force-stop com.roblox.client && monkey -p com.roblox.client -c android.intent.category.LAUNCHER 1",
+                root=True,
+            )
+            if code != 0:
+                logger.warning(f"watchdog_tick restart failed: {err or out}")
+                return False
             return True
         return False
