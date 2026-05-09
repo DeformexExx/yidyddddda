@@ -226,9 +226,9 @@ def inject_cookie_for_device(device_name: str, cookie_value: str) -> tuple[bool,
     if not clean_cookie:
         return False, "Cookie is empty"
 
-    pkg = device_package(device_name)
-    db_path = f"/data/data/{pkg}/app_webview/Default/Cookies"
-    parent_dir = f"/data/data/{pkg}/app_webview/Default"
+    pkg = "com.roblox.client"
+    db_path = "/data/data/com.roblox.client/app_webview/Default/Cookies"
+    parent_dir = "/data/data/com.roblox.client/app_webview/Default"
     temp_db = "/data/data/com.termux/files/home/temp_cookies"
 
     # MUST stop first to release lock.
@@ -271,7 +271,7 @@ def inject_cookie_for_device(device_name: str, cookie_value: str) -> tuple[bool,
 
     time.sleep(2)
     launch_code, launch_out, launch_err = run_shell(
-        f"am start -n {shlex.quote(pkg)}/com.roblox.client.MainActivity",
+        "am start -n com.roblox.client/com.roblox.client.MainActivity",
         root=True,
         timeout=20,
     )
@@ -554,6 +554,10 @@ def monitor_worker() -> None:
 
 def main() -> None:
     logger.add("watchdog.log", rotation="10 MB", retention=3, enqueue=True, backtrace=False, diagnose=False)
+
+    session_state_path = Path("session_state.json")
+    if session_state_path.exists():
+        session_state_path.unlink()
 
     startup_conflict_prevention()
     run_async(monitor.set_process_priority(os.getpid()))

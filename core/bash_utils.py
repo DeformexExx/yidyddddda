@@ -1,5 +1,6 @@
 import asyncio
 import os
+import shlex
 
 
 TERMUX_PREFIX = "/data/data/com.termux/files/usr"
@@ -18,13 +19,21 @@ def get_termux_env() -> dict[str, str]:
     return env
 
 
+def get_su_path() -> str:
+    return f"{TERMUX_BIN}/su"
+
+
 async def run_bash(command: str, root: bool = False, timeout: int = 20) -> tuple[int, str, str]:
-    # The bot runs as UID 0; do not use su -c. Execute directly in Termux bash.
+    env = get_termux_env()
+    final_command = command
+    if root:
+        final_command = f"{shlex.quote(get_su_path())} -c {shlex.quote(command)}"
+
     proc = await asyncio.create_subprocess_shell(
-        command,
+        final_command,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        env=get_termux_env(),
+        env=env,
         executable=TERMUX_BASH,
     )
     try:

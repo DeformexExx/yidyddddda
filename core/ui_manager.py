@@ -20,8 +20,9 @@ def _status_emoji(status: str) -> str:
     return "🔴"
 
 
-def build_dashboard(devices_list, device_name=None, snapshot=None, active_cookie=None, active_server=None) -> InlineKeyboardMarkup:
+def build_dashboard(self=None, device_name=None, snapshot=None, active_cookie=None, active_server=None) -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup()
+    devices_list = self
 
     if isinstance(devices_list, (list, tuple, set)):
         for dev in devices_list:
