@@ -164,11 +164,8 @@ def run_shell(command: str, root: bool = False, timeout: int = 120) -> tuple[int
 
 
 def device_package(device_name: str) -> str:
-    # Clone package naming requested by runtime: com.roblox.clien{suffix}
-    suffix = device_name.replace("DEV_", "")
-    if suffix.isdigit():
-        return f"com.roblox.clien{suffix}"
-    return f"com.roblox.{device_name}"
+    # Runtime target unified to the real package to avoid invalid clone intents.
+    return "com.roblox.client"
 
 
 def target_process_name() -> str:
@@ -356,9 +353,23 @@ def inject_server_for_device(device_name: str, link: str) -> tuple[bool, str]:
     clean_link = (link or "").strip()
     if not clean_link:
         return False, "Link is empty"
+
     pkg = device_package(device_name)
-    cmd = f"am start -a android.intent.action.VIEW -d {shlex.quote(clean_link)} {shlex.quote(pkg)}"
-    code, out, err = run_shell(cmd, root=True, timeout=20)
+    db_path = "/data/data/com.roblox.client/app_webview/Default/Cookies"
+    parent_dir = "/data/data/com.roblox.client/app_webview/Default"
+
+    # Final ownership sync right before URL VIEW launch.
+    own_code, own_out, own_err = run_shell(f"stat -c %u:%g {shlex.quote(parent_dir)}", root=True, timeout=15)
+    owner = own_out.strip() if own_code == 0 and own_out.strip() else "10167:10167"
+    run_shell(f"chown {shlex.quote(owner)} {shlex.quote(db_path)} && chmod 600 {shlex.quote(db_path)}", root=True, timeout=15)
+
+    server_link = clean_link.replace("'", "'\"'\"'")
+    launch_cmd = (
+        f"su -c \"nohup am start -a android.intent.action.VIEW "
+        f"-d '{server_link}' {pkg} "
+        f"> /dev/null 2>&1 &\""
+    )
+    code, out, err = run_shell(launch_cmd, root=False, timeout=20)
     if code != 0:
         return False, (err or out or "server open failed")
     return True, "Server link sent to clone"
