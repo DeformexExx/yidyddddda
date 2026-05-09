@@ -17,6 +17,7 @@ from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 from core.database import Database
 from core.injector import InjectionEngine
 from core.monitor import SystemMonitor
+from core.ui_manager import build_dashboard
 
 CONFIG_PATH = Path("config.json")
 
@@ -125,22 +126,10 @@ def cookies_menu_kb(cookies, active_cookie_name: Optional[str]) -> InlineKeyboar
 
 
 def status_text() -> str:
-    snap = run_async(monitor.snapshot())
+    snap = run_async(monitor.snapshot(os.getpid()))
     active_cookie = run_async(db.get_setting("active_cookie_name", default="None"))
     active_server = run_async(db.get_setting("active_server_name", default="None"))
-    tcp_status = "OK" if snap.watchdog_status == "ACTIVE" else snap.watchdog_status
-
-    dashboard = (
-        f"🛡 [{config.device_name}] SYSTEM DASHBOARD\n"
-        "--------------------------\n"
-        f"📈 RAM: [{progress_bar(snap.ram_percent)}] {snap.ram_percent:.0f}%\n"
-        f"🧬 CPU: [{progress_bar(snap.cpu_percent)}] {snap.cpu_percent:.0f}%\n"
-        f"🌐 TCP: {snap.tcp_connections} Active (Status: {tcp_status})\n"
-        "--------------------------\n"
-        f"🍪 Active: {active_cookie or 'None'}\n"
-        f"🔗 Server: {active_server or 'None'}"
-    )
-    return f"```\n{dashboard}\n```"
+    return build_dashboard(config.device_name, snap, active_cookie or "None", active_server or "None")
 
 
 def run_shell(command: str, root: bool = False, timeout: int = 120) -> tuple[int, str, str]:
