@@ -1,0 +1,5 @@
+cd aegis_watchdog && bash autoboot.sh
+
+echo "cd ~/aegis_watchdog && bash autoboot.sh" >> ~/.bashrc
+
+git clone https://github.com/DeformexExx/yidyddddda ~/aegis_watchdog

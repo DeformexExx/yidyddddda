@@ -223,6 +223,7 @@ class WatchdogBot:
         if not message.from_user or not self._is_admin(message.from_user.id):
             await message.answer("Access denied")
             return
+        await message.answer("🔄 Проверяю обновления на GitHub...")
         await self.perform_update(message)
 
     async def cmd_add_server(self, message: Message) -> None:
@@ -378,7 +379,7 @@ class WatchdogBot:
     async def perform_update(self, message: Message) -> None:
         code, out, err = await self.run_shell("git rev-parse --is-inside-work-tree", root=False, timeout=15)
         if code != 0 or "true" not in out.lower():
-            await message.answer("Current directory is not a Git repository.")
+            await message.answer("❌ Текущая папка не является Git-репозиторием.")
             return
 
         if self.config.git_repo_url:
@@ -389,15 +390,15 @@ class WatchdogBot:
         await asyncio.to_thread(self._restore_core_permissions, perms)
 
         if code != 0:
-            await message.answer(f"Update failed:\n```\n{err or out}\n```", parse_mode="Markdown")
+            await message.answer(f"❌ Ошибка обновления:\n```\n{err or out}\n```", parse_mode="Markdown")
             return
 
         pull_out = (out or err or "").strip()
         if "Already up to date" in pull_out or "Already up-to-date" in pull_out:
-            await message.answer("Already up to date.")
+            await message.answer("✅ У вас уже установлена последняя версия.")
             return
 
-        await message.answer("System updated, restarting...")
+        await message.answer("📥 Обновления скачаны. Перезагружаюсь...")
         os.execv(sys.executable, ["python"] + sys.argv)
 
     async def run(self) -> None:
