@@ -231,9 +231,12 @@ def inject_cookie_for_device(device_name: str, cookie_value: str) -> tuple[bool,
     parent_dir = "/data/data/com.roblox.client/app_webview/Default"
     temp_db = "/sdcard/Cookies"
 
-    # MUST stop first to release lock.
-    stop_code, stop_out, stop_err = run_shell(f"am force-stop {target_process_name()}", root=True, timeout=20)
+    # MUST stop first to release lock. This becomes:
+    # /system/bin/su -c "/system/bin/am force-stop com.roblox.client"
+    stop_code, stop_out, stop_err = run_shell(f"/system/bin/am force-stop {target_process_name()}", root=True, timeout=20)
     logger.info(f"cookie_pre_stop [{device_name}] code={stop_code} out={stop_out} err={stop_err}")
+    if stop_code != 0:
+        return False, (stop_err or stop_out or "force-stop failed; cookie db is still locked by Roblox")
 
     # SDCard relay flow.
     code, out, err = run_shell(f"cp {shlex.quote(db_path)} {shlex.quote(temp_db)} && chmod 777 {shlex.quote(temp_db)}", root=True, timeout=20)
@@ -278,7 +281,7 @@ def inject_cookie_for_device(device_name: str, cookie_value: str) -> tuple[bool,
 
     time.sleep(2)
     launch_code, launch_out, launch_err = run_shell(
-        "am start -n com.roblox.client/com.roblox.client.startup.ActivitySplash",
+        "/system/bin/am start -n com.roblox.client/com.roblox.client.startup.ActivitySplash",
         root=True,
         timeout=20,
     )
