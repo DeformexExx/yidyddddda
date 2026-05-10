@@ -23,7 +23,6 @@ from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 PROJECT_ROOT = "/data/data/com.termux/files/home/aegis_watchdog"
 CONFIG_PATH = Path(PROJECT_ROOT) / "config.json"
 DB_PATH = "/data/data/com.roblox.client/app_webview/Default/Cookies"
-PID_FILE = Path(".bot.pid")
 LOG_FILE = "watchdog.log"
 
 @dataclass
@@ -82,14 +81,8 @@ config = load_config()
 bot = telebot.TeleBot(config.bot_token, parse_mode="HTML")
 
 def run_shell(command: str, root: bool = True) -> tuple[int, str, str]:
-    """Execute shell command via subprocess, optionally using su -c."""
     try:
-        # Wrap command for su -c if root is requested
-        if root:
-            full_cmd = f"su -c {shlex.quote(command)}"
-        else:
-            full_cmd = command
-            
+        full_cmd = f"su -c {shlex.quote(command)}" if root else command
         process = subprocess.run(
             full_cmd,
             shell=True,
@@ -102,115 +95,38 @@ def run_shell(command: str, root: bool = True) -> tuple[int, str, str]:
         return -1, "", str(e)
 
 # ==========================================
-# DATABASE INJECTION (ROOT BYPASS)
+# 1. THE ONLY WORKING INJECTION METHOD (ROOT SHELL)
 # ==========================================
 
-def db_exec(sql: str) -> tuple[int, str, str]:
-    """Execute SQL directly via sqlite3 binary with root privileges."""
-    # Use the requested format: su -c "sqlite3 /path/to/db \"{sql}\""
-    # We must be careful with nested quotes.
-    escaped_sql = sql.replace('"', '\\"')
-    cmd = f'sqlite3 {DB_PATH} "{escaped_sql}"'
-    return run_shell(cmd, root=True)
+def inject_cookie_root(cookie_value):
+    # Total cleanup first to prevent duplicates
+    cleanup_cmd = "sqlite3 /data/data/com.roblox.client/app_webview/Default/Cookies \"DELETE FROM cookies;\""
+    
+    # Direct SQL Injection via su -c
+    insert_sql = f"""
+    INSERT INTO cookies (creation_utc, host_key, name, value, path, expires_utc, is_secure, is_httponly, last_access_utc, has_expires, is_persistent, priority) 
+    VALUES (strftime('%s','now'), '.roblox.com', '.ROBLOSECURITY', '{cookie_value}', '/', strftime('%s','now', '+1 year'), 1, 1, strftime('%s','now'), 1, 1, 1);
+    """
+    # Added a semicolon between cleanup and insert for shell execution
+    full_cmd = f"su -c \"{cleanup_cmd}; sqlite3 /data/data/com.roblox.client/app_webview/Default/Cookies '{insert_sql}'\""
+    
+    import subprocess
+    result = subprocess.run(full_cmd, shell=True, capture_output=True)
+    
+    # Relaunch Roblox
+    run_shell("am start -n com.roblox.client/com.roblox.client.startup.ActivitySplash", root=True)
+    
+    if result.returncode == 0:
+        return True, "Injection Successful (Root Shell)"
+    return False, f"SQL Error: {result.stderr.decode('utf-8', errors='ignore')}"
 
-def get_db_schema() -> list[dict]:
-    """Fetch table schema to handle dynamic NOT NULL columns."""
-    code, out, err = db_exec("PRAGMA table_info(cookies);")
-    columns = []
-    if code == 0 and out:
-        for line in out.splitlines():
-            # Format: id|name|type|notnull|dflt_value|pk
-            parts = line.split("|")
-            if len(parts) >= 6:
-                columns.append({
-                    "name": parts[1],
-                    "type": parts[2].upper(),
-                    "notnull": int(parts[3]),
-                    "dflt": parts[4]
-                })
-    return columns
+# ==========================================
+# 3. ACCURATE RAM FALLBACK
+# ==========================================
 
-def inject_cookie(cookie_value: str) -> tuple[bool, str]:
-    """Inject Roblox cookie using the MONOLITH root method."""
+def get_ram_display_stats() -> tuple[float, str]:
+    """Get RAM stats with Glitch Fallback and Python Process Memory info."""
     try:
-        # 1. Stop Roblox to unlock DB
-        run_shell("am force-stop com.roblox.client", root=True)
-        time.sleep(1)
-
-        # 2. Analyze Schema
-        cols = get_db_schema()
-        if not cols:
-            return False, "Failed to read cookie schema (DB may be missing or locked)"
-
-        # 3. Build Injection SQL
-        creation_utc = "((strftime('%s','now') + 11644473600) * 1000000)"
-        expires_utc = "((strftime('%s','now') + 11644473600 + 31536000) * 1000000)"
-        esc_cookie = cookie_value.strip().replace("'", "''")
-        
-        provided = {
-            "creation_utc": creation_utc,
-            "host_key": "'.roblox.com'",
-            "name": "'.ROBLOSECURITY'",
-            "value": f"'{esc_cookie}'",
-            "path": "'/'",
-            "expires_utc": expires_utc,
-            "is_secure": "1",
-            "is_httponly": "1",
-            "last_access_utc": creation_utc,
-            "has_expires": "1",
-            "is_persistent": "1",
-            "priority": "1",
-            "samesite": "-1",
-            "source_port": "443",
-            "last_update_utc": creation_utc,
-            "source_scheme": "2",
-        }
-
-        insert_cols = []
-        insert_vals = []
-        for col in cols:
-            name = col["name"]
-            if name in provided:
-                insert_cols.append(name)
-                insert_vals.append(provided[name])
-            elif col["notnull"]:
-                # Fill mandatory columns with defaults
-                if col["dflt"]:
-                    insert_vals.append(col["dflt"])
-                elif any(k in col["type"] for k in ("INT", "REAL", "NUM", "BOOL")):
-                    insert_vals.append("0")
-                else:
-                    insert_vals.append("''")
-                insert_cols.append(name)
-
-        # 4. Execute Atomic Injection
-        sql_blob = (
-            "DELETE FROM cookies WHERE name = '.ROBLOSECURITY';"
-            f"INSERT INTO cookies ({', '.join(insert_cols)}) VALUES ({', '.join(insert_vals)});"
-            "REINDEX cookies;"
-            "VACUUM;"
-        )
-        
-        code, out, err = db_exec(sql_blob)
-        if code != 0:
-            return False, f"SQL Error: {err or out}"
-
-        # 5. Fix Permissions & Restart
-        run_shell(f"chmod 600 {DB_PATH}", root=True)
-        run_shell("am start -n com.roblox.client/com.roblox.client.startup.ActivitySplash", root=True)
-        
-        return True, "Injection Successful (Root Bypass Used)"
-    except Exception as e:
-        return False, f"System Error: {str(e)}"
-
-# ==========================================
-# SYSTEM MONITORING
-# ==========================================
-
-def get_ram_usage() -> float:
-    """Get RAM usage percentage with Kernel Glitch fallback."""
-    try:
-        # Use dumpsys for Android accuracy
         code, out, _ = run_shell("dumpsys meminfo | grep 'Total RAM:'", root=True)
         total_kb = 0
         free_kb = 0
@@ -222,21 +138,24 @@ def get_ram_usage() -> float:
                 free_kb = int(match.group(2).replace(",", ""))
 
         if total_kb <= 0:
-            # Fallback to /proc/meminfo
             code, out, _ = run_shell("cat /proc/meminfo", root=True)
             for line in out.splitlines():
                 if line.startswith("MemTotal:"): total_kb = int(line.split()[1])
                 if line.startswith("MemAvailable:"): free_kb = int(line.split()[1])
 
-        # HARDCORE FALLBACK: Kernel Glitch Fix
-        if total_kb > 64 * 1024 * 1024: # > 64GB
-            total_kb = 4 * 1024 * 1024 # Force 4GB
-            if free_kb > total_kb: free_kb = total_kb // 2
-
-        if total_kb <= 0: return 0.0
-        return ((total_kb - free_kb) / total_kb) * 100.0
+        # Glitch Check (> 64GB)
+        if total_kb > 64 * 1024 * 1024:
+            # Hardcode display to 4GB
+            display_total = "4.0 GB"
+            # Get Python memory
+            code_py, out_py, _ = run_shell(f"dumpsys meminfo {os.getpid()} | grep 'TOTAL PSS:'", root=True)
+            py_mem = out_py.split()[2] if code_py == 0 and out_py else "Unknown"
+            return 25.0, f"TOTAL: {display_total} (FIXED) | PY: {py_mem}KB"
+        
+        used_percent = ((total_kb - free_kb) / total_kb) * 100.0 if total_kb > 0 else 0.0
+        return used_percent, f"{used_percent:.1f}% ({total_kb//1024}MB)"
     except:
-        return 0.0
+        return 0.0, "Error"
 
 def get_cpu_usage() -> float:
     try:
@@ -275,7 +194,7 @@ def build_dashboard(selected_device: str) -> InlineKeyboardMarkup:
     return kb
 
 def build_device_page(name: str) -> tuple[str, InlineKeyboardMarkup]:
-    ram = get_ram_usage()
+    ram_p, ram_txt = get_ram_display_stats()
     cpu = get_cpu_usage()
     con = get_active_connections()
     state = devices.get(name)
@@ -283,7 +202,7 @@ def build_device_page(name: str) -> tuple[str, InlineKeyboardMarkup]:
     text = (
         f"<pre>\n"
         f"DEVICE: {html.escape(name)}\n"
-        f"RAM: [{_bar(ram)}] {ram:.1f}%\n"
+        f"RAM: [{_bar(ram_p)}] {ram_txt}\n"
         f"CPU: [{_bar(cpu)}] {cpu:.1f}%\n"
         f"CON: {con} | STATUS: {state.last_status if state else 'IDLE'}\n"
         f"WATCHDOG: {'ENABLED' if (state and state.output_on) else 'DISABLED'}\n"
@@ -298,8 +217,10 @@ def build_device_page(name: str) -> tuple[str, InlineKeyboardMarkup]:
     kb.row(InlineKeyboardButton("⬅️ BACK", callback_data="menu:main"))
     return text, kb
 
+# 2. SYNTAX ERROR FIX (GLOBAL DECLARATION)
 @bot.message_handler(commands=["start", "menu"])
 def cmd_start(message):
+    global silent_mode
     if message.from_user.id not in config.admin_ids: return
     user_id = message.from_user.id
     if user_id not in sessions:
@@ -307,12 +228,13 @@ def cmd_start(message):
     
     state = sessions[user_id]
     state.view = "main"
-    text = f"<pre>AEGIS MONOLITH HUB\nHOST: {config.device_name}\nFOCUS: {state.selected_device}</pre>"
+    text = f"<pre>AEGIS MONOLITH HUB\nHOST: {config.device_name}\nFOCUS: {state.selected_device}\nSILENT: {'ON' if silent_mode else 'OFF'}</pre>"
     msg = bot.send_message(message.chat.id, text, reply_markup=build_dashboard(state.selected_device))
     tracked_messages[message.chat.id] = (user_id, msg.message_id)
 
 @bot.callback_query_handler(func=lambda c: True)
 def handle_callbacks(call):
+    global silent_mode
     if call.from_user.id not in config.admin_ids: return
     user_id = call.from_user.id
     state = sessions.get(user_id)
@@ -322,7 +244,7 @@ def handle_callbacks(call):
     try:
         if data == "menu:main":
             state.view = "main"
-            text = f"<pre>AEGIS MONOLITH HUB\nHOST: {config.device_name}\nFOCUS: {state.selected_device}</pre>"
+            text = f"<pre>AEGIS MONOLITH HUB\nHOST: {config.device_name}\nFOCUS: {state.selected_device}\nSILENT: {'ON' if silent_mode else 'OFF'}</pre>"
             bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=build_dashboard(state.selected_device))
         
         elif data.startswith("dev:"):
@@ -333,13 +255,10 @@ def handle_callbacks(call):
         
         elif data.startswith("act:"):
             parts = data.split(":")
-            act = parts[1]
-            dev = parts[2]
-            
+            act, dev = parts[1], parts[2]
             if act == "start":
                 devices[dev].output_on = True
                 devices[dev].last_status = "STARTING"
-                # START COMMAND
                 run_shell("am start -n com.roblox.client/com.roblox.client.startup.ActivitySplash", root=True)
                 bot.answer_callback_query(call.id, f"{dev} started")
             elif act == "stop":
@@ -364,7 +283,6 @@ def handle_callbacks(call):
             bot.edit_message_text("<pre>SYSTEM SETTINGS</pre>", call.message.chat.id, call.message.message_id, reply_markup=kb)
             
         elif data == "set:silent":
-            global silent_mode
             silent_mode = not silent_mode
             bot.answer_callback_query(call.id, f"Silent mode {'ON' if silent_mode else 'OFF'}")
             # Refresh settings view
@@ -374,30 +292,40 @@ def handle_callbacks(call):
             kb.row(InlineKeyboardButton("⬅️ BACK", callback_data="menu:main"))
             bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=kb)
 
+        elif data == "set:update":
+            bot.answer_callback_query(call.id, "Starting Update...")
+            # 5. UPDATE MECHANISM
+            update_cmd = "git -c safe.directory='*' fetch --all && git -c safe.directory='*' reset --hard origin/main && git -c safe.directory='*' clean -fd"
+            code, out, err = run_shell(update_cmd, root=False)
+            if code == 0:
+                bot.send_message(call.message.chat.id, "✅ Update Successful. Restarting...")
+                os._exit(0)
+            else:
+                bot.send_message(call.message.chat.id, f"❌ Update Failed: {err or out}")
+
     except Exception as e:
         logger.error(f"Callback Error: {e}")
         bot.answer_callback_query(call.id, "Error occurred")
 
 @bot.message_handler(func=lambda m: True)
 def handle_text(message):
+    global silent_mode
     if message.from_user.id not in config.admin_ids: return
     state = sessions.get(message.from_user.id)
     if not state or not state.wait_mode: return
 
     payload = message.text.strip()
-    dev = state.selected_device
     
     if state.wait_mode == "WAIT_COOKIE":
-        bot.send_message(message.chat.id, "⏳ Injecting cookie via Root Shell...")
-        ok, res = inject_cookie(payload)
+        bot.send_message(message.chat.id, "⏳ Injecting cookie via Root Shell (STRICT)...")
+        ok, res = inject_cookie_root(payload)
         bot.send_message(message.chat.id, f"{'✅' if ok else '❌'} {res}")
     
     elif state.wait_mode == "WAIT_SERVER":
-        # WINNING LAUNCH COMMAND FORMAT
         link = payload.replace("'", "'\"'\"'")
-        # Execute verified command via root shell bypass
-        cmd = f"nohup am start -a android.intent.action.VIEW -d '{link}' com.roblox.client > /dev/null 2>&1 &"
-        code, _, err = run_shell(cmd, root=True)
+        # WINNING LAUNCH COMMAND
+        cmd = f"su -c \"nohup am start -a android.intent.action.VIEW -d '{link}' com.roblox.client > /dev/null 2>&1 &\""
+        code, _, err = run_shell(cmd, root=False)
         bot.send_message(message.chat.id, "✅ Server link sent!" if code == 0 else f"❌ Error: {err}")
 
     state.wait_mode = None
@@ -407,12 +335,12 @@ def handle_text(message):
 # ==========================================
 
 def monitor_worker():
+    global silent_mode
     while True:
         try:
             con = get_active_connections()
             for dev in devices.values():
                 if not dev.output_on: continue
-                # Auto-restart if connections dropped too low
                 if con < 5:
                     run_shell("am force-stop com.roblox.client && am start -n com.roblox.client/com.roblox.client.startup.ActivitySplash", root=True)
                     dev.last_status = "RESTARTED"
@@ -420,6 +348,7 @@ def monitor_worker():
         except: time.sleep(30)
 
 def ui_refresh_worker():
+    global silent_mode
     while True:
         try:
             for chat_id, (user_id, msg_id) in list(tracked_messages.items()):
@@ -436,34 +365,35 @@ def ui_refresh_worker():
 # ==========================================
 
 def main():
-    print("Project MONOLITH v1.0 starting...")
+    # 4. RE-REGISTRATION OF CALLBACKS / HANDLERS (Implicit in Telebot)
+    # Ensuring logger and stabilization before everything
+    print("Project MONOLITH v1.1 - Deploying STRICT fixes...")
     
-    # 1. Startup Cleanup (Mandatory)
+    # Root Cleanup
     run_shell("rm -f .bot.pid", root=True)
     
-    # 2. File Initialization & Stabilization
+    # File Initialization
     try:
         if not os.path.exists(LOG_FILE):
             open(LOG_FILE, "a").close()
-        # Force 777 permissions
         run_shell(f"chmod 777 {LOG_FILE}", root=True)
         logger.add(LOG_FILE, rotation="10 MB", retention=3)
     except Exception as e:
         print(f"File Init Error: {e}")
 
-    # 3. Discover Devices
+    # Discover Devices
     devices[config.device_name] = DeviceState(name=config.device_name, pid=os.getpid())
     for p in Path(".").glob("DEV_*.json"):
         if p.stem not in devices:
             devices[p.stem] = DeviceState(name=p.stem, pid=0)
 
-    # 4. Start Threads
+    # Start Threads
     threading.Thread(target=monitor_worker, daemon=True).start()
     threading.Thread(target=ui_refresh_worker, daemon=True).start()
 
-    logger.info("Monolith Engine Online")
+    logger.info("Monolith v1.1 STRICT Online")
 
-    # 5. Infinity Polling
+    # Infinity Polling
     while True:
         try:
             bot.infinity_polling(timeout=60, long_polling_timeout=40)
