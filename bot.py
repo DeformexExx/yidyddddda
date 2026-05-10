@@ -300,10 +300,26 @@ def device_actions(call):
 
 
 def main():
+    # 1. Initialize Log File & Permissions
+    log_file = "watchdog.log"
+    if not os.path.exists(log_file):
+        open(log_file, "a").close()
+    os.chmod(log_file, 0o777)
+    
+    logger.add(log_file, rotation="10 MB", retention=3, enqueue=True, backtrace=False, diagnose=False)
+
+    # 2. Auto-Stabilization: Fix file permissions
+    run_async(run_bash("chown -R $(id -u):$(id -g) .", root=True, timeout=15))
+
     run_async(monitor.set_process_priority(os.getpid()))
+    
+    # 3. Initialize Workers
     threading.Thread(target=monitor_loop, daemon=True).start()
     threading.Thread(target=refresh_loop, daemon=True).start()
-    logger.info("Aegis V13 TeleBot started")
+    
+    logger.info("Aegis V13 TeleBot started (Stabilized)")
+    
+    # 4. Start Polling
     while True:
         try:
             bot.infinity_polling(timeout=60, long_polling_timeout=40)

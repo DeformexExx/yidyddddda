@@ -314,10 +314,12 @@ def inject_cookie_for_device(device_name: str, cookie_value: str) -> tuple[bool,
         return False, "no injectable columns detected"
 
     insert_sql = f"INSERT INTO cookies ({', '.join(insert_cols)}) VALUES ({', '.join(insert_vals)})"
+    # Strict sequence: DELETE -> INSERT -> REINDEX -> VACUUM
     sql_blob = (
-        "DELETE FROM cookies WHERE name = '.ROBLOSECURITY'; "
-        f"{insert_sql}; "
-        "REINDEX cookies; VACUUM;"
+        "DELETE FROM cookies WHERE name = '.ROBLOSECURITY';"
+        f"{insert_sql};"
+        "REINDEX cookies;"
+        "VACUUM;"
     )
 
     code, out, err = run_shell(f"{shlex.quote(sqlite_bin)} {shlex.quote(temp_db)} \"{sql_blob}\"", root=True, timeout=90)
@@ -337,11 +339,9 @@ def inject_cookie_for_device(device_name: str, cookie_value: str) -> tuple[bool,
     run_shell(f"chown {shlex.quote(owner)} {shlex.quote(db_path)} && chmod 600 {shlex.quote(db_path)}", root=True, timeout=15)
 
     time.sleep(2)
-    launch_code, launch_out, launch_err = run_shell(
-        "/system/bin/am start -n com.roblox.client/.startup.ActivitySplash",
-        root=True,
-        timeout=20,
-    )
+    # Using the winning launch format even for splash if no link provided
+    launch_cmd = f"su -c \"nohup am start -n com.roblox.client/com.roblox.client.startup.ActivitySplash > /dev/null 2>&1 &\""
+    launch_code, launch_out, launch_err = run_shell(launch_cmd, root=False, timeout=20)
     logger.info(f"cookie_post_launch [{device_name}] code={launch_code} out={launch_out} err={launch_err}")
     if launch_code != 0:
         return False, (launch_err or launch_out or "clone launch failed")
@@ -364,10 +364,10 @@ def inject_server_for_device(device_name: str, link: str) -> tuple[bool, str]:
     run_shell(f"chown {shlex.quote(owner)} {shlex.quote(db_path)} && chmod 600 {shlex.quote(db_path)}", root=True, timeout=15)
 
     server_link = clean_link.replace("'", "'\"'\"'")
+    # Winning Launch Command Format
     launch_cmd = (
         f"su -c \"nohup am start -a android.intent.action.VIEW "
-        f"-d '{server_link}' {pkg} "
-        f"> /dev/null 2>&1 &\""
+        f"-d '{server_link}' com.roblox.client > /dev/null 2>&1 &\""
     )
     code, out, err = run_shell(launch_cmd, root=False, timeout=20)
     if code != 0:
@@ -638,7 +638,16 @@ def monitor_worker() -> None:
 
 
 def main() -> None:
-    logger.add("watchdog.log", rotation="10 MB", retention=3, enqueue=True, backtrace=False, diagnose=False)
+    # 1. Initialize Log File & Permissions
+    log_file = "watchdog.log"
+    if not os.path.exists(log_file):
+        open(log_file, "a").close()
+    os.chmod(log_file, 0o777)
+    
+    logger.add(log_file, rotation="10 MB", retention=3, enqueue=True, backtrace=False, diagnose=False)
+
+    # 2. Auto-Stabilization: Fix file permissions
+    run_async(run_bash("chown -R $(id -u):$(id -g) .", root=True, timeout=15))
 
     session_state_path = Path("session_state.json")
     if session_state_path.exists():
@@ -648,11 +657,13 @@ def main() -> None:
     run_async(monitor.set_process_priority(os.getpid()))
     run_async(db.initialize())
 
+    # 3. Initialize Workers
     threading.Thread(target=monitor_worker, daemon=True).start()
     threading.Thread(target=auto_refresh_worker, daemon=True).start()
 
-    logger.info("Aegis V13 main.py started")
+    logger.info("Aegis V13 main.py started (Stabilized)")
 
+    # 4. Start Polling (Handlers are already registered)
     while True:
         try:
             bot.infinity_polling(timeout=60, long_polling_timeout=40)
